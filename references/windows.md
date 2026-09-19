@@ -354,12 +354,22 @@ git -C $RepoRoot status --porcelain
 If that's non-empty, stop and surface it; let the user commit or stash. Don't
 stash on their behalf.
 
-With a clean tree:
+With a clean tree, check what's staged first -- your own verification runs may
+have created build artifacts that aren't part of the worker's result:
 
 ```powershell
 git -C $WorktreeDir add -A
+git -C $WorktreeDir diff --cached --name-status
+# unstage anything that isn't work product, e.g.:
+# git -C $WorktreeDir restore --staged '__pycache__'
+```
+
+Then produce and apply. `--binary` is required (see `SKILL.md`: without it a
+patch touching any binary file is rejected as lacking a full index line):
+
+```powershell
 $finalDiff = Join-Path $RunLogDir "final.diff"
-git -C $WorktreeDir diff --cached | Set-Content -Path $finalDiff -Encoding utf8
+git -C $WorktreeDir diff --cached --binary | Set-Content -Path $finalDiff -Encoding utf8
 git -C $RepoRoot apply $finalDiff
 ```
 

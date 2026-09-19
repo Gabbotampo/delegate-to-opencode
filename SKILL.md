@@ -445,11 +445,31 @@ the user commit or stash first. Don't stash on their behalf -- that's their
 work, and silently moving it is exactly the kind of surprise this playbook
 avoids elsewhere.
 
-With a clean tree:
+With a clean tree, **first check what's actually staged** -- your own
+verification runs in step 4 may have littered the worktree with build
+artifacts (`__pycache__/`, `.pytest_cache/`, compiled output, `node_modules/`)
+that aren't part of the worker's result. In a project that gitignores them
+they never appear; in one that doesn't, `add -A` sweeps them into the patch:
 
 ```bash
 git -C "$WORKTREE_DIR" add -A
-git -C "$WORKTREE_DIR" diff --cached > "$RUN_LOG_DIR/final.diff"
+git -C "$WORKTREE_DIR" diff --cached --name-status
+```
+
+Unstage anything that isn't the work product before building the patch:
+
+```bash
+git -C "$WORKTREE_DIR" restore --staged '__pycache__' '.pytest_cache'   # etc., as applicable
+```
+
+Then produce and apply it. **`--binary` is required, not optional**: without
+it, a patch touching any binary file is generated without its full index line
+and `git apply` rejects it outright ("cannot apply binary patch without full
+index line") -- verified, and an easy way to lose a good result to a
+mechanical failure:
+
+```bash
+git -C "$WORKTREE_DIR" diff --cached --binary > "$RUN_LOG_DIR/final.diff"
 git -C "$REPO_ROOT" apply "$RUN_LOG_DIR/final.diff"
 ```
 
