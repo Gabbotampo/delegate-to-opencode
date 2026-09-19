@@ -80,15 +80,30 @@ function Invoke-Supervised {
     $start = Get-Date; $lastProgress = Get-Date
 
     while ($true) {
-        if ($proc.HasExited) { return "exited-cleanly" }
+        if ($proc.HasExited) {
+            # Exiting is not succeeding -- a run can die in seconds having
+            # done nothing. Only the terminal event means "finished".
+            $j = Get-JsonOutput -Path $StdOutFile -StartChar '{'
+            if ($j) {
+                $j | jq -s -e 'any(.[]; .type=="step_finish" and .part.reason=="stop")' 2>$null | Out-Null
+                if ($LASTEXITCODE -eq 0) { return "exited-complete" }
+            }
+            return "exited-incomplete"
+        }
         Start-Sleep -Seconds $PollSecs
 
-        # Signal 1: our run's lines in the shared log.
+        # Signal 1: our run's lines in the shared log. Match `directory=` as a
+        # FIELD, never as a bare substring -- see SKILL.md: opencode lists every
+        # worktree of a project in one line, so a substring match makes parallel
+        # workers on one repo adopt each other's run ids.
         $newLines = Get-Content $LogFile | Select-Object -Skip $logMark
         if (-not $runId) {
-            $hit = $newLines | Select-String -SimpleMatch $WorktreeDir |
-                   Select-Object -First 1
-            if ($hit -and $hit.Line -match 'run=([a-f0-9]+)') { $runId = $Matches[1] }
+            $needle = "directory=$WorktreeDir"
+            $hit = $newLines | Where-Object {
+                     $_.Contains($needle) -and
+                     ($_.Substring($_.IndexOf($needle) + $needle.Length) -match '^(\s|$)')
+                   } | Select-Object -First 1
+            if ($hit -and $hit -match 'run=([a-f0-9]+)') { $runId = $Matches[1] }
         }
         $count = 0
         if ($runId) { $count = ($newLines | Select-String -SimpleMatch "run=$runId").Count }
@@ -263,9 +278,11 @@ $Outcome = Invoke-Supervised `
     -WorktreeDir $WorktreeDir -LogFile $LogFile
 ```
 
-`$Outcome` is one of `signalled-complete`, `exited-cleanly`,
-`stalled-no-progress`, `max-deadline` -- act on it exactly as the outcome
-table in `SKILL.md` step 2 describes. In particular, on a stall or deadline,
+`$Outcome` is one of `signalled-complete`, `exited-complete`,
+`exited-incomplete`, `stalled-no-progress`, `max-deadline` -- act on it
+exactly as the outcome table in `SKILL.md` step 2 describes. Note especially
+that `exited-incomplete` is a failure: a run can exit within seconds having
+done nothing, so a plain exit is never proof of success. In particular, on a stall or deadline,
 **check `$WorktreeDir` for the requested file(s) before deciding anything**:
 opencode has been observed to hang both during bootstrap (nothing done) and
 mid-turn (edit already correctly written to disk). Don't discard work just

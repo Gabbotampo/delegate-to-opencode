@@ -251,17 +251,30 @@ PROMPT
   >"$OUT" 2>"$RUN_LOG_DIR/turn1.err.log" &
 PID=$!
 
+# Match our directory as the `directory=` FIELD, never as a bare substring.
+# Critical with parallel workers on one repo: opencode emits a
+# "project copy refresh done" line listing *every* worktree of the project, so
+# a substring match latches onto a sibling's run id and then tracks the wrong
+# process's liveness entirely. Verified -- this exact collision happened.
+WT_RE=$(printf '%s' "$WORKTREE_DIR" | sed 's/[][\.*^$(){}?+|]/\\&/g')
+
 RUN_ID=""; START=$SECONDS; LAST_PROGRESS=$SECONDS
-LAST_COUNT=0; LAST_OUTSZ=0; OUTCOME=""
+LAST_COUNT=0; LAST_OUTSZ=0; OUTCOME=""; RC=0
 while :; do
-  if ! kill -0 "$PID" 2>/dev/null; then OUTCOME="exited-cleanly"; break; fi
+  if ! kill -0 "$PID" 2>/dev/null; then
+    wait "$PID"; RC=$?
+    # Exiting is not succeeding: a run can die in seconds having done nothing.
+    if turn_complete "$OUT"; then OUTCOME="exited-complete"
+    else OUTCOME="exited-incomplete"; fi
+    break
+  fi
   sleep "$POLL_SECS"
 
   # Signal 1: our run's lines in the shared log.
-  # Correlate this run in the shared log (it logs our --dir at startup).
   if [ -z "$RUN_ID" ]; then
     RUN_ID=$(tail -n +"$((LOG_MARK + 1))" "$LOG_FILE" 2>/dev/null \
-      | grep -F "$WORKTREE_DIR" | grep -oE 'run=[a-f0-9]+' | head -n1 | cut -d= -f2)
+      | grep -E "directory=${WT_RE}([[:space:]]|$)" \
+      | grep -oE 'run=[a-f0-9]+' | head -n1 | cut -d= -f2)
   fi
   COUNT=0
   [ -n "$RUN_ID" ] && COUNT=$(tail -n +"$((LOG_MARK + 1))" "$LOG_FILE" 2>/dev/null \
@@ -285,7 +298,6 @@ while :; do
     stop_worker "$PID"; OUTCOME="max-deadline"; break
   fi
 done
-wait "$PID" 2>/dev/null
 ```
 
 **Tuning `STALL_SECS`:** 120s suits the free default. Raise it for a slow or
@@ -308,7 +320,8 @@ stronger model: exact paths, exact commands, exact scope boundary.
 | Outcome | What it means | What to do |
 |---|---|---|
 | `signalled-complete` | Model emitted its terminal event | Go to Review (step 4). Normal path. |
-| `exited-cleanly` | Process ended on its own | Go to Review. Check the exit status too, but review the diff either way. |
+| `exited-complete` | Process ended *and* had emitted the terminal event | Go to Review. Normal path. |
+| `exited-incomplete` | Process ended without ever finishing the turn (`RC` holds its exit code) | Infrastructure failure. Verified: a run can exit "cleanly" within ~5s having created no session and done nothing at all. **Never read a plain exit as success.** Check the filesystem, then resend. |
 | `stalled-no-progress` | Wedged -- no log/output movement for `STALL_SECS` | **Check the filesystem before assuming nothing happened** (see below), then decide. |
 | `max-deadline` | Looked busy the whole time but never finished | Same: inspect what landed, then decide. |
 
@@ -515,15 +528,23 @@ Review and integrate each worker's diff independently (step 4 and 6) before
 touching the real branch -- don't batch-merge unreviewed diffs just because
 they all finished.
 
-**Isolation verified in practice:** two workers launched together (distinct
-repos, dirs, sessions, titles) ran their full timeout windows independently
-with zero cross-talk -- each resolved to its own session, neither touched the
-other's files, and each was correctly identifiable afterward purely from its
-own `LABEL`/`WORKTREE_DIR`. Completion reliability is a separate question and
-inherits the same caveat as a lone worker (see the timeout note in step 2) --
-isolation being solid doesn't make the underlying model faster or more
-reliable, it just guarantees failures stay contained to the worker that hit
-them instead of corrupting its siblings.
+**Verified end-to-end:** three workers launched concurrently against **one
+shared repo** (three worktrees, three sessions), then reviewed and integrated
+individually. Two completed correctly and applied cleanly; each touched only
+its own file, resolved only its own session, and left no orphan worktrees. The
+third died seconds after launch having done nothing -- and was caught by the
+review step, never reaching the repo. So: **file and session isolation hold
+under real concurrency, individual worker reliability does not.** Plan for
+partial success -- treat each worker's result as independently pass/fail, and
+never assume "they all finished" means "they all worked."
+
+That run also exposed the correlation trap now guarded against above: because
+all three worktrees belonged to one project, opencode's "project copy refresh
+done" line enumerated *every* worktree path, so a substring match on the
+directory made one worker adopt a sibling's run id and silently track the
+wrong process's liveness. Matching `directory=` as a field is what prevents
+it; with workers in separate repos the bug is invisible, which is exactly why
+it survived an earlier round of testing.
 
 ## Recovering orphaned workers
 
