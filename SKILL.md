@@ -73,6 +73,28 @@ context/output) -- good for many small independent subtasks where turnaround
 matters more than context depth, or as a fallback if the default is
 persistently erroring.
 
+**Before using a model that isn't a known-free default, check whether it
+actually costs money:**
+
+```bash
+PROVIDER="${MODEL%%/*}"; MODEL_ID="${MODEL#*/}"
+IS_FREE=$(jq -r --arg p "$PROVIDER" --arg m "$MODEL_ID" '
+  .[]? | select(.id==$p) | .models[$m]?.cost? |
+  if . == null then "unknown"
+  elif (.input==0 and .output==0) then "free"
+  else "paid" end
+' ~/.cache/opencode/models.json 2>/dev/null)
+```
+
+If `$IS_FREE` isn't `free` (it came back `paid`, `unknown`, or the cache file
+is missing -- try `opencode models --refresh` first if so), tell the user
+which model you're about to use, that it isn't confirmed free, and roughly
+how many invocations to expect (parallel workers multiply this by worker
+count, and iteration can run up to 5 turns per worker) -- then get an
+explicit go-ahead before the first real invocation. Skip this check only for
+`opencode/nemotron-3-ultra-free` and `opencode/nemotron-3.5-lightning-free`,
+which are confirmed free.
+
 ## Is this task a fit for delegation?
 
 Delegate when the subtask has:
@@ -96,6 +118,31 @@ Do it yourself instead when:
   the orchestrating agent can.
 
 ## Process (applies per worker -- one worker is just N=1)
+
+### 0. Smoke-test opencode (once per session, not per worker)
+
+Before delegating anything real, confirm opencode itself is responding.
+Cheap and fast when healthy -- and per the timeout note in step 2, silent
+hangs are a real, observed condition worth ruling out before committing a
+real task's time budget to it:
+
+```bash
+timeout 30 opencode run "Reply with exactly the single word OK and do nothing else. Do not read, create, or edit any files." \
+  -m "$MODEL" \
+  --format json \
+  --pure \
+  --dir "$(mktemp -d)" \
+  --title "smoke-test" \
+  >/tmp/opencode-smoke.json 2>&1
+SMOKE_EXIT=$?
+```
+
+If `SMOKE_EXIT` is non-zero (including 124), don't proceed with real
+delegation yet -- tell the user opencode isn't responding reliably right now
+(check `opencode providers list` / `opencode auth login`, or just try again
+shortly), rather than discovering the same thing 180 seconds into a real
+task. Once this passes, skip it for the rest of the session -- no need to
+repeat per worker.
 
 ### 1. Scope the task and isolate a workspace
 
@@ -292,6 +339,39 @@ rather than blindly relaunching the same call.
 Review and integrate each worker's diff independently (step 4 and 6) before
 touching the real branch -- don't batch-merge unreviewed diffs just because
 they all finished.
+
+**Isolation verified in practice:** two workers launched together (distinct
+repos, dirs, sessions, titles) ran their full timeout windows independently
+with zero cross-talk -- each resolved to its own session, neither touched the
+other's files, and each was correctly identifiable afterward purely from its
+own `LABEL`/`WORKTREE_DIR`. Completion reliability is a separate question and
+inherits the same caveat as a lone worker (see the timeout note in step 2) --
+isolation being solid doesn't make the underlying model faster or more
+reliable, it just guarantees failures stay contained to the worker that hit
+them instead of corrupting its siblings.
+
+## Recovering orphaned workers
+
+If a previous delegation was interrupted (agent crashed, session ended, hard
+timeout) before step 6 ran, its worktree and branch are left behind. Nothing
+auto-deletes them -- deleting a worktree you haven't inspected could throw
+away completed work (see the timeout note in step 2). Check for orphans at
+the start of a delegation session, or whenever you suspect a previous one
+didn't finish cleanly:
+
+```bash
+git -C "$REPO_ROOT" worktree list | grep 'opencode/'
+```
+
+For each orphan found: inspect it like step 4 (`git -C <dir> diff`, read the
+files), then either integrate it (step 6) or discard it
+(`git -C "$REPO_ROOT" worktree remove --force <dir>` +
+`git -C "$REPO_ROOT" branch -D <branch>`). Don't bulk-delete without looking
+-- same "never trust blindly" rule as reviewing a worker's own output.
+
+Non-repo scratch-dir tasks aren't tracked anywhere -- an interrupted one just
+leaves an orphaned directory under the system temp dir, lower-stakes and
+typically cleaned up by the OS over time.
 
 ## Boundaries
 
