@@ -50,6 +50,25 @@ metadata; skip straight to the `# Delegate to opencode` heading.
   for why, and why `--dir` matters).
 - `git`, `jq`, and standard coreutils.
 
+## Platform support
+
+Written and tested on Linux (Arch). The playbook is a bash script embedded in
+markdown -- `mktemp`, `awk`, `jq`, `timeout`, heredocs, `$(...)` -- so it needs
+a real POSIX-ish shell.
+
+- **Linux / macOS:** works as documented.
+- **Windows:** only via **WSL** (a real Linux userspace) -- untested by the
+  author (no Windows machine available), but there's nothing in the playbook
+  itself that's Linux-specific once you're inside WSL, beyond `opencode` and
+  `jq` needing to be installed *inside* the WSL distro, not the Windows side.
+- **Native Windows (PowerShell/cmd, no WSL): not supported.** `mktemp`, `awk`,
+  GNU `timeout`, and the heredoc/`$(...)` syntax throughout `SKILL.md` don't
+  exist there. Porting it would mean rewriting every command block (`New-Item
+  -ItemType Directory` for `mktemp -d`, `Start-Process -Wait` with a timeout
+  wrapper for `timeout`, `ConvertFrom-Json`/`Select-Object` for the `jq`
+  pipelines, etc.) -- real work, not a find-and-replace. PRs welcome if
+  someone wants to do it.
+
 ## Usage examples
 
 ```

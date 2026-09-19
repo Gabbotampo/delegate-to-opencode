@@ -49,7 +49,10 @@ without independently checking the result.
   answer it. This is exactly what makes `--dir` the real isolation boundary
   (see Boundaries): the worker gets unsupervised read/edit/bash inside
   whatever directory it's given.
-- `git`, `jq`, and standard coreutils (`mktemp`, `awk`, `timeout`) available.
+- `git`, `jq`, and standard coreutils (`mktemp`, `awk`, `timeout`) available --
+  a real POSIX-ish shell. On Windows this means running inside WSL; the
+  command blocks below don't translate to plain PowerShell/cmd (see the
+  README's Platform support section).
 
 ## Model selection
 
