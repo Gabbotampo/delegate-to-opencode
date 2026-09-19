@@ -185,65 +185,120 @@ the diff you're about to review:
 RUN_LOG_DIR=$(mktemp -d)
 ```
 
-### 2. First turn -- always a fresh session, always under a timeout
+### 2. First turn -- always a fresh session, always supervised
+
+**Why not just `timeout N opencode run ...`?** Because a fixed deadline
+answers the wrong question. It can't tell "still working, needs more time"
+from "wedged and will never finish" -- so you either cut off slow-but-healthy
+work, or sit idle for the full deadline after something has already died.
+Instead, launch it in the background and supervise it: **keep waiting as long
+as it's making progress, kill it once it goes quiet.** Two independent signals
+make that possible:
+
+- **Completion:** the `--format json` event stream ends with a `step_finish`
+  event whose `part.reason` is `"stop"`. That's the model saying "this turn is
+  done" -- the closest thing to the worker reporting back. (Other
+  `step_finish` reasons, e.g. `tool-calls`, mean more steps are coming; don't
+  treat those as done.)
+- **Liveness:** opencode writes a continuous internal log (path from
+  `opencode debug paths`, file `opencode.log`) as it boots, creates the
+  session, and runs each step -- even before any JSON event reaches stdout.
+  Lines still appearing for your run = alive. Lines stopped = stalled.
 
 ```bash
-TIMEOUT_SECS=180
-timeout "$TIMEOUT_SECS" opencode run "$(cat <<'PROMPT'
+LOG_FILE="$(opencode debug paths | awk '$1=="log"{print $2}')/opencode.log"
+OUT="$RUN_LOG_DIR/turn1.out.json"
+POLL_SECS=5          # how often to check
+STALL_SECS=45        # no progress for this long => wedged, kill it
+MAX_TOTAL_SECS=600   # absolute backstop, even if it keeps looking busy
+LOG_MARK=$(wc -l < "$LOG_FILE")   # ignore everything already in the shared log
+
+turn_complete() {
+  awk '/^\{/{f=1} f' "$1" 2>/dev/null \
+    | jq -s -e 'any(.[]; .type=="step_finish" and .part.reason=="stop")' >/dev/null 2>&1
+}
+
+opencode run "$(cat <<'PROMPT'
 Implement <precise, scoped task>. Only touch files under <path>.
 Follow the existing conventions in <specific file to mirror>, attached below.
 Acceptance: running `<exact test/build command>` in this directory must pass.
 Do one focused turn and then stop -- do not schedule or defer any follow-up work.
 PROMPT
 )" \
-  -m "$MODEL" \
-  --format json \
-  --pure \
-  --dir "$WORKTREE_DIR" \
-  --title "$LABEL" \
+  -m "$MODEL" --format json --pure \
+  --dir "$WORKTREE_DIR" --title "$LABEL" \
   -f "<path/to/spec-or-example-file>" \
-  >"$RUN_LOG_DIR/turn1.out.json" 2>"$RUN_LOG_DIR/turn1.err.log"
-TURN1_EXIT=$?
+  >"$OUT" 2>"$RUN_LOG_DIR/turn1.err.log" &
+PID=$!
+
+RUN_ID=""; START=$SECONDS; LAST_PROGRESS=$SECONDS; LAST_COUNT=0; OUTCOME=""
+while :; do
+  if ! kill -0 "$PID" 2>/dev/null; then OUTCOME="exited-cleanly"; break; fi
+  sleep "$POLL_SECS"
+
+  # Correlate this run in the shared log (it logs our --dir at startup).
+  if [ -z "$RUN_ID" ]; then
+    RUN_ID=$(tail -n +"$((LOG_MARK + 1))" "$LOG_FILE" 2>/dev/null \
+      | grep -F "$WORKTREE_DIR" | grep -oE 'run=[a-f0-9]+' | head -n1 | cut -d= -f2)
+  fi
+  COUNT=0
+  [ -n "$RUN_ID" ] && COUNT=$(tail -n +"$((LOG_MARK + 1))" "$LOG_FILE" 2>/dev/null \
+    | grep -c "run=$RUN_ID" || true)
+  [ "$COUNT" -gt "$LAST_COUNT" ] && { LAST_COUNT=$COUNT; LAST_PROGRESS=$SECONDS; }
+
+  if turn_complete "$OUT"; then
+    sleep 2; kill "$PID" 2>/dev/null; OUTCOME="signalled-complete"; break
+  fi
+  if [ $((SECONDS - LAST_PROGRESS)) -ge "$STALL_SECS" ]; then
+    kill "$PID" 2>/dev/null; OUTCOME="stalled-no-progress"; break
+  fi
+  if [ $((SECONDS - START)) -ge "$MAX_TOTAL_SECS" ]; then
+    kill "$PID" 2>/dev/null; OUTCOME="max-deadline"; break
+  fi
+done
+wait "$PID" 2>/dev/null
 ```
+
+Correlating on `run=$RUN_ID` (not just "the log grew") is what keeps this
+correct with parallel workers -- they all write to the same shared log file,
+so a sibling's progress must not read as yours.
 
 `-f` is optional -- attach a spec or an existing file to mirror when that's more
 reliable than trusting the model to go find conventions on its own. If you're
 on the free tier, write the prompt more explicitly than you would for a
 stronger model: exact paths, exact commands, exact scope boundary.
 
-**`timeout` is not optional.** `opencode run` has been observed to hang
-indefinitely -- no output, no error, no exit -- on tool-use turns (read/edit),
-even in a clean, uncontended, freshly-isolated `--dir`, with no single root
-cause pinned down (ruled out in testing: repo/path collisions, sandboxed-shell
-execution, missing session/desktop-session environment variables, TTY
-detection). It looked most consistent with the free backend occasionally
-stalling with no error surfaced. In one observed case, the edit had already
-landed correctly on disk (file hash changed, content correct) before the
-process stalled on a later internal step -- so a hang is not necessarily a
-failure of the work, only of the process returning. Treat it as a known
-operating condition to guard against, not a bug in this playbook.
+**Acting on `$OUTCOME`:**
 
-If `TURN1_EXIT` is non-zero, including **124** (killed by `timeout`) or **137**
-(killed by SIGKILL from an outer timeout), treat it as an infrastructure-level
-failure -- not necessarily a task-quality problem. **Before deciding what to
-do next, check the filesystem first**: read `$WORKTREE_DIR` for the file(s)
-the prompt asked about -- the work may have already completed and landed on
-disk even though the process never returned. If it's there and correct,
-proceed to Review as normal. If not, don't retry the same call in a loop; see
-Parallel workers for how to back off.
+| Outcome | What it means | What to do |
+|---|---|---|
+| `signalled-complete` | Model emitted its terminal event | Go to Review (step 4). Normal path. |
+| `exited-cleanly` | Process ended on its own | Go to Review. Check the exit status too, but review the diff either way. |
+| `stalled-no-progress` | Wedged -- no log/output movement for `STALL_SECS` | **Check the filesystem before assuming nothing happened** (see below), then decide. |
+| `max-deadline` | Looked busy the whole time but never finished | Same: inspect what landed, then decide. |
+
+**Never treat a stall as "no work was done."** Verified: `opencode run` can
+hang with no output, no error, and no exit, in two distinct modes --
+(a) during **bootstrap**, before the session is even created, so nothing
+happens at all; and (b) **mid-turn**, where log inspection showed the model
+had already read *and correctly edited* the target file on disk before
+stalling on a later internal call. In mode (b) the work is done and sitting in
+`$WORKTREE_DIR` -- discarding it because the process misbehaved would throw
+away a good result. So on any non-completion outcome, read `$WORKTREE_DIR`
+first, then decide. Root cause was never pinned down (ruled out: repo/path
+collisions, sandboxed-shell execution, missing session/desktop environment
+variables, TTY detection); it looks like the free backend intermittently
+stalling with nothing surfaced. Treat it as a known operating condition, not a
+bug in this playbook. If nothing landed, don't retry the same call in a loop;
+see Parallel workers for how to back off.
 
 Non-interactive shells sometimes print a startup banner (MOTD, `fastfetch`,
-etc.) to stdout before your real command's output. Skip to the real JSON
-before reading it:
-
-```bash
-awk '/^\{/{f=1} f' "$RUN_LOG_DIR/turn1.out.json"
-```
-
-The exact event schema inside that JSON stream isn't guaranteed stable across
-opencode versions -- read the events directly and interpret them; don't
-hard-code assumptions about a specific field. The ground truth for "what
-actually happened" is the filesystem, not the model's narration (see Review).
+etc.) to stdout before your real command's output -- which is why every read
+of the stream above goes through `awk '/^\{/{f=1} f'` first. Beyond the
+terminal-event check, the exact event schema isn't guaranteed stable across
+opencode versions: read the events and interpret them rather than hard-coding
+assumptions. And the ground truth for "what actually happened" is always the
+filesystem, not the model's narration (see Review).
 
 ### 3. Resolve and record the session id (once, right after the first turn)
 
@@ -284,15 +339,20 @@ context, so name the exact failure (quote the failing test, point at the exact
 diff problem), not "try again":
 
 ```bash
-timeout "$TIMEOUT_SECS" opencode run "The tests in <path> still fail because <specific reason>. Fix specifically that -- don't change anything else." \
-  -m "$MODEL" \
-  --format json \
-  --pure \
-  --dir "$WORKTREE_DIR" \
-  --session "$SESSION_ID" \
-  --title "$LABEL" \
-  >"$RUN_LOG_DIR/turn2.out.json" 2>"$RUN_LOG_DIR/turn2.err.log"
+OUT="$RUN_LOG_DIR/turn2.out.json"
+LOG_MARK=$(wc -l < "$LOG_FILE")   # re-mark: only this turn's log lines count
+
+opencode run "The tests in <path> still fail because <specific reason>. Fix specifically that -- don't change anything else." \
+  -m "$MODEL" --format json --pure \
+  --dir "$WORKTREE_DIR" --session "$SESSION_ID" --title "$LABEL" \
+  >"$OUT" 2>"$RUN_LOG_DIR/turn2.err.log" &
+PID=$!
+# ...then the same supervise loop as step 2, unchanged.
 ```
+
+Re-marking `LOG_MARK` and resetting `RUN_ID`/`LAST_COUNT` before each turn
+matters: a new invocation gets a new run id, and stale counters from the
+previous turn would make a fresh process look like it had already stalled.
 
 If round 5 still isn't acceptable: stop delegating this subtask. Either finish
 it yourself directly, or tell the user plainly what was tried and why it isn't
@@ -337,10 +397,14 @@ worker as each finishes.
 Concurrency cap: **default 3 concurrent workers, soft ceiling 4.** There is no
 documented rate limit for the free tier to design against -- this is a
 deliberate, conservative heuristic, not a confirmed number. Treat the first
-real parallel batch as calibration. If any worker's `opencode run` exits
-non-zero or times out (infrastructure-level failure, not a bad answer -- see
+real parallel batch as calibration. If any worker ends in `stalled-no-progress`
+or `max-deadline` (infrastructure-level failure, not a bad answer -- see
 step 2), reduce concurrency for the rest of the queued subtasks in this batch
 rather than blindly relaunching the same call.
+
+Each worker needs its **own** `LOG_MARK`, `RUN_ID`, and progress counters --
+they share one log file, and correlating on `run=$RUN_ID` is what stops one
+worker's progress from masking another's stall.
 
 Review and integrate each worker's diff independently (step 4 and 6) before
 touching the real branch -- don't batch-merge unreviewed diffs just because
@@ -406,11 +470,12 @@ typically cleaned up by the OS over time.
 - Don't retry a failed `opencode run` invocation in a loop. Surface the
   failure, decide deliberately (fewer workers, different approach, or hand it
   to the user), and re-issue as a new, visible action if warranted.
-- Never run `opencode run` without a `timeout` wrapper. It has been observed
-  to hang indefinitely with no output or error on tool-use turns. A hang is
-  not self-limiting -- without `timeout`, a stuck worker occupies its slot
-  forever. Always check `$WORKTREE_DIR` for completed work before treating a
-  timeout-kill as wasted effort -- the edit may have already landed.
+- Never run `opencode run` unsupervised. It has been observed to hang
+  indefinitely with no output, no error, and no exit -- both during bootstrap
+  and mid-turn. A hang is not self-limiting, so a stuck worker would occupy
+  its slot forever. Use the supervise loop from step 2 (or at minimum a
+  `timeout` wrapper), and always check `$WORKTREE_DIR` for completed work
+  before treating a kill as wasted effort -- the edit may have already landed.
 
 ## Flags reference
 

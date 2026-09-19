@@ -34,7 +34,8 @@ Two small functions used throughout below -- define them once per session.
 GNU `timeout`. This starts a process, waits up to `$TimeoutSecs`, kills it if
 still running, and returns an exit code -- **124 on a timeout-kill, matching
 the exit-code convention `SKILL.md` documents**, so "if the exit code is 124
-or non-zero" guidance means the same thing on both platforms:
+or non-zero" guidance means the same thing on both platforms. Used for the
+smoke test only; real delegation turns use `Invoke-Supervised` below:
 
 ```powershell
 function Invoke-WithTimeout {
@@ -55,6 +56,69 @@ function Invoke-WithTimeout {
     return $proc.ExitCode
 }
 ```
+
+**Supervised launch (progress-aware).** The equivalent of `SKILL.md` step 2's
+supervise loop -- read that section for the reasoning (why a fixed deadline
+answers the wrong question, and the two signals: the `step_finish` /
+`part.reason == "stop"` terminal event, plus opencode's internal log as a
+liveness feed). Returns one of the same four outcome strings:
+
+```powershell
+function Invoke-Supervised {
+    param(
+        [string[]]$ArgumentList,
+        [string]$StdOutFile, [string]$StdErrFile,
+        [string]$WorktreeDir, [string]$LogFile,
+        [int]$PollSecs = 5, [int]$StallSecs = 45, [int]$MaxTotalSecs = 600
+    )
+    $logMark = (Get-Content $LogFile | Measure-Object -Line).Lines
+    $proc = Start-Process -FilePath "opencode" -ArgumentList $ArgumentList `
+        -NoNewWindow -PassThru `
+        -RedirectStandardOutput $StdOutFile -RedirectStandardError $StdErrFile
+
+    $runId = $null; $lastCount = 0
+    $start = Get-Date; $lastProgress = Get-Date
+
+    while ($true) {
+        if ($proc.HasExited) { return "exited-cleanly" }
+        Start-Sleep -Seconds $PollSecs
+
+        $newLines = Get-Content $LogFile | Select-Object -Skip $logMark
+        if (-not $runId) {
+            $hit = $newLines | Select-String -SimpleMatch $WorktreeDir |
+                   Select-Object -First 1
+            if ($hit -and $hit.Line -match 'run=([a-f0-9]+)') { $runId = $Matches[1] }
+        }
+        if ($runId) {
+            $count = ($newLines | Select-String -SimpleMatch "run=$runId").Count
+            if ($count -gt $lastCount) { $lastCount = $count; $lastProgress = Get-Date }
+        }
+
+        # Terminal event: model says this turn is done.
+        $json = Get-JsonOutput -Path $StdOutFile -StartChar '{'
+        if ($json) {
+            $done = $json | jq -s -e 'any(.[]; .type=="step_finish" and .part.reason=="stop")' 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Start-Sleep -Seconds 2
+                if (-not $proc.HasExited) { $proc.Kill() }
+                return "signalled-complete"
+            }
+        }
+
+        if (((Get-Date) - $lastProgress).TotalSeconds -ge $StallSecs) {
+            if (-not $proc.HasExited) { $proc.Kill() }
+            return "stalled-no-progress"
+        }
+        if (((Get-Date) - $start).TotalSeconds -ge $MaxTotalSecs) {
+            if (-not $proc.HasExited) { $proc.Kill() }
+            return "max-deadline"
+        }
+    }
+}
+```
+
+`$LogFile` is `opencode.log` inside the log directory that
+`opencode debug paths` reports (see Prerequisites -- don't guess the path).
 
 **Skip to the real JSON**, the same way `SKILL.md` uses `awk '/^\{/{f=1} f'`
 to drop a shell startup banner before opencode's actual output -- parameterized
@@ -151,10 +215,9 @@ needs them.
 Non-repo / standalone task -- skip the `git worktree` lines, just use a
 fresh temp directory as `$WorktreeDir`.
 
-### 2. First turn -- always a fresh session, always timeout-bounded
+### 2. First turn -- always a fresh session, always supervised
 
 ```powershell
-$TimeoutSecs = 180
 $prompt = @'
 Implement <precise, scoped task>. Only touch files under <path>.
 Follow the existing conventions in <specific file to mirror>, attached below.
@@ -165,19 +228,22 @@ Do one focused turn and then stop -- do not schedule or defer any follow-up work
 $turn1Out = Join-Path $RunLogDir "turn1.out.json"
 $turn1Err = Join-Path $RunLogDir "turn1.err.log"
 
-$Turn1Exit = Invoke-WithTimeout -FilePath "opencode" -TimeoutSecs $TimeoutSecs `
+$Outcome = Invoke-Supervised `
     -ArgumentList @(
         "run", $prompt, "-m", $Model, "--format", "json", "--pure",
         "--dir", $WorktreeDir, "--title", $Label
     ) `
-    -StdOutFile $turn1Out -StdErrFile $turn1Err
+    -StdOutFile $turn1Out -StdErrFile $turn1Err `
+    -WorktreeDir $WorktreeDir -LogFile $LogFile
 ```
 
-Same hang caveat as `SKILL.md` step 2, verbatim: `opencode run` has been
-observed to hang indefinitely on tool-use turns with no error. If
-`$Turn1Exit` is non-zero (including **124**, the timeout-kill), **check
-`$WorktreeDir` for the requested file(s) before deciding anything** -- the
-work may have already landed even though the process didn't return cleanly.
+`$Outcome` is one of `signalled-complete`, `exited-cleanly`,
+`stalled-no-progress`, `max-deadline` -- act on it exactly as the outcome
+table in `SKILL.md` step 2 describes. In particular, on a stall or deadline,
+**check `$WorktreeDir` for the requested file(s) before deciding anything**:
+opencode has been observed to hang both during bootstrap (nothing done) and
+mid-turn (edit already correctly written to disk). Don't discard work just
+because the process misbehaved.
 
 ```powershell
 $turn1Json = Get-JsonOutput -Path $turn1Out -StartChar '{'
@@ -229,14 +295,19 @@ refinements), each turn naming the exact failure, not "try again":
 $turn2Out = Join-Path $RunLogDir "turn2.out.json"
 $turn2Err = Join-Path $RunLogDir "turn2.err.log"
 
-$Turn2Exit = Invoke-WithTimeout -FilePath "opencode" -TimeoutSecs $TimeoutSecs `
+$Outcome = Invoke-Supervised `
     -ArgumentList @(
         "run", "The tests in <path> still fail because <specific reason>. Fix specifically that -- don't change anything else.",
         "-m", $Model, "--format", "json", "--pure",
         "--dir", $WorktreeDir, "--session", $SessionId, "--title", $Label
     ) `
-    -StdOutFile $turn2Out -StdErrFile $turn2Err
+    -StdOutFile $turn2Out -StdErrFile $turn2Err `
+    -WorktreeDir $WorktreeDir -LogFile $LogFile
 ```
+
+`Invoke-Supervised` re-reads the log mark and re-resolves the run id on every
+call, so each turn is measured independently -- no stale counters from the
+previous turn.
 
 If round 5 still isn't acceptable: same rule as `SKILL.md` -- finish it
 yourself, or tell the user plainly what was tried and why it isn't

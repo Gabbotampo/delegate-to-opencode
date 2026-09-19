@@ -121,12 +121,20 @@ math -- it's not boilerplate, use it as a real filter.
 
 ## Known limitation
 
-`opencode run` has been observed to hang indefinitely on tool-use turns, with
-no error and no exit, on at least one setup -- root cause wasn't pinned down.
-The playbook wraps every invocation in `timeout` and checks the filesystem
-before assuming a hang means the work didn't happen (it sometimes already
-had). See the "timeout is not optional" note in `SKILL.md` for details. Issues
-and PRs narrowing this down further are welcome.
+`opencode run` has been observed to hang indefinitely -- no output, no error,
+no exit -- on at least one setup, in two distinct modes: during **bootstrap**
+(before the session is even created, nothing done) and **mid-turn** (where the
+target file had already been read *and correctly edited* on disk before the
+process stalled on a later internal call). Root cause wasn't pinned down.
+
+Rather than a fixed timeout, every delegation turn is **supervised**: the
+playbook watches opencode's terminal event (`step_finish` with
+`part.reason == "stop"`) for completion and its internal log for liveness --
+so it keeps waiting while real progress is happening and kills only once
+things go quiet. On any non-completion outcome it inspects the worktree before
+concluding nothing happened, precisely because of the mid-turn case above. See
+step 2 of `SKILL.md` for the full mechanism. Issues and PRs narrowing the root
+cause down further are welcome.
 
 ## License
 
