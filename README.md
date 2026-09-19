@@ -33,8 +33,9 @@ git clone https://github.com/Gabbotampo/delegate-to-opencode.git
 ln -s "$(pwd)/delegate-to-opencode" ~/.claude/skills/delegate-to-opencode
 ```
 
-Claude Code picks it up automatically -- ask it to delegate something to
-opencode, or run `/delegate-to-opencode`.
+Clone it wherever you keep your repos -- the symlink target is what matters,
+not the clone location. Claude Code then picks it up automatically -- ask it
+to delegate something to opencode, or run `/delegate-to-opencode`.
 
 **Anything else (Codex, aider, a plain terminal session, ...):**
 
@@ -57,17 +58,17 @@ markdown -- `mktemp`, `awk`, `jq`, `timeout`, heredocs, `$(...)` -- so it needs
 a real POSIX-ish shell.
 
 - **Linux / macOS:** works as documented.
-- **Windows:** only via **WSL** (a real Linux userspace) -- untested by the
-  author (no Windows machine available), but there's nothing in the playbook
-  itself that's Linux-specific once you're inside WSL, beyond `opencode` and
-  `jq` needing to be installed *inside* the WSL distro, not the Windows side.
-- **Native Windows (PowerShell/cmd, no WSL): not supported.** `mktemp`, `awk`,
-  GNU `timeout`, and the heredoc/`$(...)` syntax throughout `SKILL.md` don't
-  exist there. Porting it would mean rewriting every command block (`New-Item
-  -ItemType Directory` for `mktemp -d`, `Start-Process -Wait` with a timeout
-  wrapper for `timeout`, `ConvertFrom-Json`/`Select-Object` for the `jq`
-  pipelines, etc.) -- real work, not a find-and-replace. PRs welcome if
-  someone wants to do it.
+- **Windows via WSL:** use `SKILL.md` as-is inside a WSL distro (a real Linux
+  userspace) -- untested by the author (no Windows machine available), but
+  there's nothing in the playbook that's Linux-specific once you're inside
+  WSL, beyond `opencode` and `jq` needing to be installed *inside* the distro,
+  not the Windows side.
+- **Native Windows (PowerShell, no WSL):** see
+  [`references/windows.md`](references/windows.md) -- a full PowerShell
+  translation of every command block, same rules and reasoning as
+  `SKILL.md`. **Also untested on a real Windows machine** -- it's a careful
+  translation, not a verified port. Issues/PRs from anyone who can actually
+  run it on Windows are genuinely welcome.
 
 ## Usage examples
 
@@ -82,6 +83,41 @@ Fan out 3 independent opencode workers to port the utils/ files to TypeScript.
 Full behavior, all flags, safety rules, and known operating caveats are
 documented in [`SKILL.md`](SKILL.md) -- read it before relying on this for
 anything important.
+
+## Token savings (rough estimate)
+
+**This is reasoning about the mechanics, not a measured benchmark** -- no A/B
+test exists comparing "the orchestrating model does the task itself" against
+"it delegates" on the same task. Treat the numbers below as directional, not
+precise.
+
+The core idea: when you delegate, the orchestrating model only pays for
+scoping the task and reviewing the result -- the delegated model absorbs the
+expensive part (reading context, reasoning through the implementation,
+generating the code) at whatever the delegated model's own cost is (with the
+default model, $0). The more expensive the orchestrating model's own
+reasoning would have been, the more there is to save by not spending it.
+
+Rough range for a medium, well-scoped task (a function plus tests, clear
+spec), **in the success case**:
+
+| Orchestrating model / effort | Est. tokens if done directly | Est. tokens if delegated + reviewed | Est. savings |
+|---|---|---|---|
+| Frontier model, max reasoning effort | 15,000-40,000+ | 3,000-8,000 | ~70-85% |
+| Frontier model, default reasoning | 6,000-15,000 | 2,500-6,000 | ~50-65% |
+| Mid-size model, default | 3,000-8,000 | 2,000-4,000 | ~30-45% |
+| Small/fast model, low effort | 1,500-4,000 | 1,200-2,500 | ~15-30% |
+
+**The success case is doing a lot of work in that table.** In real testing
+against the free default model during this project's own development, 2 of 9
+real tool-use delegation attempts actually completed before a timeout (see
+Known limitation below). Every failed attempt still costs the scoping prompt
+and the time spent waiting before falling back to doing the work directly --
+so the *expected* savings, weighted by observed success rate, are
+meaningfully lower than the table above, and can go negative for small tasks
+delegated speculatively. The "Is this task a fit for delegation?" section in
+`SKILL.md` exists specifically to keep you on the winning side of that
+math -- it's not boilerplate, use it as a real filter.
 
 ## Known limitation
 

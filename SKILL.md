@@ -14,7 +14,9 @@ description: >
   Use when the user asks to delegate coding work to opencode, offload
   implementation to a free or local model, run opencode workers in parallel,
   have a worker model do the grunt work while the agent reviews it, use a
-  specific model via opencode, or runs /delegate-to-opencode.
+  specific model via opencode, delegate on Windows/PowerShell, or runs
+  /delegate-to-opencode. On native Windows without WSL, use
+  references/windows.md instead of the bash below.
 ---
 
 # Delegate to opencode
@@ -50,9 +52,10 @@ without independently checking the result.
   (see Boundaries): the worker gets unsupervised read/edit/bash inside
   whatever directory it's given.
 - `git`, `jq`, and standard coreutils (`mktemp`, `awk`, `timeout`) available --
-  a real POSIX-ish shell. On Windows this means running inside WSL; the
-  command blocks below don't translate to plain PowerShell/cmd (see the
-  README's Platform support section).
+  a real POSIX-ish shell. On Windows this means running inside WSL and using
+  this file as-is; on native Windows without WSL, use
+  [`references/windows.md`](references/windows.md) instead -- a PowerShell
+  translation of every command block below, same rules and reasoning.
 
 ## Model selection
 
