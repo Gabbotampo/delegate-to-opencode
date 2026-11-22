@@ -32,6 +32,11 @@ Only ids under `.free` are free. `.clinePass` models need a paid Cline Pass, and
 `cline-free/nemotron-3.5-super-vl` and `nvidia/nemotron-3.5-lightning-free`. So read
 the feed at the start of every delegation session, never a remembered id.
 
+Cline's free models also have a **daily limit per account**: observed, after
+about a dozen worker turns in one morning every run ended with
+`Daily free model limit reached` (exit 1). Treat it like a quota (switch to
+another pool), not like a transient error.
+
 Every run also reports what it cost. **Check it after each turn**: anything other
 than `0` means the model was not free. Stop and tell the user.
 
