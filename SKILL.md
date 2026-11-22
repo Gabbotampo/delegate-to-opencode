@@ -117,6 +117,19 @@ verified failure:
    directory is the process's cwd. Do it in a subshell so the agent's own
    shell never moves.
 
+**The helper commands start the shared background service.** `opencode
+models` and `opencode debug paths` (used in Model selection) start
+`opencode serve --service` when it isn't running, and it stays up after they
+exit (observed on 2.1.4, about 300 MB resident). Workers don't need it
+(`--standalone`). Record its state before the first helper call and, if it
+wasn't running, stop it when the delegation session ends:
+
+```bash
+SERVICE_BEFORE=$(opencode service status </dev/null 2>&1 | head -n1)   # "stopped" or its URL
+# ... delegation ...
+[ "$SERVICE_BEFORE" = stopped ] && opencode service stop </dev/null >/dev/null 2>&1
+```
+
 `OPENCODE_DISABLE_CLAUDE_CODE=1` stops the worker from loading Claude Code's
 own instructions and skills (`~/.claude/...`) -- they're the orchestrator's,
 not the worker's. `OPENCODE_DISABLE_AUTOUPDATE=1` keeps a worker run from
