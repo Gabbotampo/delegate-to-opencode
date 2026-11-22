@@ -291,7 +291,12 @@ on `opencode/deepseek-v4.1-flash-free`, that run and the next runs on
 `opencode/big-pickle` all ended with it. Switch to a free model on another
 provider (for example an `openrouter/...:free` one, checked as in Model
 selection) instead of resending, and keep turns bounded so one task doesn't
-spend the day's quota.
+spend the day's quota. OpenRouter's `:free` models have their own daily cap
+(`429 provider.rate-limit` "Rate limit exceeded: free-models-per-day"; without
+account credits it is small -- observed: one multi-step worker turn used it
+up). The `nvidia/...` provider (NVIDIA's API) is a separate pool. Before a
+large fan-out of free workers, check how many requests each pool still
+allows; several long workers can exhaust every free pool in one session.
 
 If `SMOKE_EXIT` is non-zero (including 124), don't proceed with real
 delegation yet -- tell the user opencode isn't responding reliably right now
