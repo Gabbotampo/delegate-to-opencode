@@ -16,7 +16,8 @@ description: >
   have a worker model do the grunt work while the agent reviews it, use a
   specific model via opencode, delegate on Windows/PowerShell, or runs
   /delegate-to-opencode. On native Windows without WSL, use
-  references/windows.md instead of the bash below.
+  references/windows.md instead of the bash below. To use the Cline CLI
+  (`cline`) as the worker instead of opencode, follow references/cline.md.
 ---
 
 # Delegate to opencode
@@ -34,6 +35,15 @@ by default the free `opencode/deepseek-v4.1-flash-free`, but see Model selection
 -- does the actual typing: editing files and running commands inside a
 directory the agent chose for it. The agent never merges or reports success
 without independently checking the result.
+
+## Worker CLIs
+
+This file drives `opencode`. The same playbook also works with the
+[Cline](https://cline.bot) CLI as the worker: [`references/cline.md`](references/cline.md)
+gives its commands, its free models, what a Cline worker inherits, and the one
+real difference (no non-interactive continuation, so refinements are fresh,
+self-contained turns). Several free pools (opencode's providers, Cline's free
+models) also spread a fan-out of workers over separate rate limits.
 
 ## Which opencode version this targets
 

@@ -12,6 +12,9 @@ by a small benchmark of the free models on the author's install, see `SKILL.md`)
 model your `opencode` install supports can be used instead -- just say which
 one you want.
 
+It can also drive the [Cline](https://cline.bot) CLI as the worker, with Cline's free
+models: see [`references/cline.md`](references/cline.md).
+
 Also supports fanning out several isolated `opencode` worker processes in
 parallel for independent subtasks, each in its own git worktree or scratch
 directory with a fresh session and no shared state, with the orchestrating
