@@ -85,7 +85,7 @@ Free pools have limits, and they run out:
 | Pool | Limit seen | Error |
 |---|---|---|
 | OpenCode Zen (`opencode/*-free`) | one quota for every free model of the account; one ~23-minute review turn used it up | `429` `provider.free-limit` |
-| OpenRouter (`openrouter/...:free`) | small daily cap without account credits; one multi-step turn used it up | `429` `free-models-per-day` |
+| OpenRouter (`openrouter/...:free`) | [20 requests/minute](https://openrouter.ai/docs/api/reference/limits) (a short wait clears it) and 50 requests/day under 10 credits bought, 1,000 from 10 (lasts the day); each agent step is one request, so one multi-step turn used up the 50 | `429` (per minute, transient) / `429` `free-models-per-day` (daily) |
 | NVIDIA (`nvidia/...`) | separate pool, still answering when the two above were spent | -- |
 | Cline (`cline-free/...`) | free promotions end: 5 of 6 ids ended on one day | `Free model promotion ended` |
 

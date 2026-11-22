@@ -311,10 +311,17 @@ on `opencode/deepseek-v4.1-flash-free`, that run and the next runs on
 `opencode/big-pickle` all ended with it. Switch to a free model on another
 provider (for example an `openrouter/...:free` one, checked as in Model
 selection) instead of resending, and keep turns bounded so one task doesn't
-spend the day's quota. OpenRouter's `:free` models have their own daily cap
-(`429 provider.rate-limit` "Rate limit exceeded: free-models-per-day"; without
-account credits it is small -- observed: one multi-step worker turn used it
-up). The `nvidia/...` provider (NVIDIA's API) is a separate pool. Before a
+spend the day's quota. OpenRouter's `:free` models have two separate limits
+(OpenRouter's docs, https://openrouter.ai/docs/api/reference/limits): **20
+requests per minute** for everyone, and a **daily** cap of 50 requests on an
+account that has bought under 10 credits in total (1,000 a day from 10
+credits on). Tell them apart by the message. A per-minute 429, or a busy
+upstream provider (OpenRouter retries other providers first), clears within
+about a minute: wait and resend. `429 provider.rate-limit` "Rate limit
+exceeded: free-models-per-day" is the daily cap and doesn't clear until the
+next day. Every agent step is one request, so a single multi-step worker
+turn can use up 50 (observed). The `nvidia/...` provider (NVIDIA's API) is a
+separate pool. Before a
 large fan-out of free workers, check how many requests each pool still
 allows; several long workers can exhaust every free pool in one session.
 
