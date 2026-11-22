@@ -150,6 +150,17 @@ SERVICE_BEFORE=$(opencode service status </dev/null 2>&1 | head -n1)   # "stoppe
 [ "$SERVICE_BEFORE" = stopped ] && opencode service stop </dev/null >/dev/null 2>&1
 ```
 
+**Put resource limits in the worker's environment, not only in the prompt.**
+A worker's shell commands inherit the environment of `opencode run`, so
+anything that must hold -- a build output directory, no debug info, one build
+job -- belongs in the `env` of the invocation (for a Rust project:
+`CARGO_TARGET_DIR=<dir> CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+CARGO_BUILD_JOBS=1`). Observed: told in the prompt to reuse a given target
+directory, a worker's refinement turn built into the worktree's default
+`target/` with full debug info instead and filled 36 GB of disk in under an
+hour. With several workers, also run a disk watchdog that stops them below a
+free-space floor.
+
 `OPENCODE_DISABLE_CLAUDE_CODE=1` stops the worker from loading Claude Code's
 own instructions and skills (`~/.claude/...`) -- they're the orchestrator's,
 not the worker's. `OPENCODE_DISABLE_AUTOUPDATE=1` keeps a worker run from
