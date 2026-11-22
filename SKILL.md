@@ -47,7 +47,9 @@ models) also spread a fan-out of workers over separate rate limits.
 
 ## Which opencode version this targets
 
-This revision targets **opencode 2.x** (verified end to end on 2.1.4). The
+This revision targets **opencode 2.x** (verified end to end on 2.1.4, and
+re-checked on 2.3.2: smoke test, isolated config with 0 plugins loaded, a
+two-turn session continued with `-s`, the event stream). The
 2.x CLI dropped several flags the 1.x playbook relied on (`--pure`, `--dir`,
 `--attach`, `--share`, `--port`, `-i` are all gone from `opencode run`), and
 it changed how a turn ends. Check once:
@@ -59,6 +61,14 @@ opencode run --help | grep -E -- '--pure|--dir'   # any hit = you have 1.x
 
 If `--pure`/`--dir` are listed, you have 1.x: use the 1.x revision of this
 file (commit `d937f69` in this repository) instead.
+
+Changes seen between 2.1.4 and 2.3.2, none of which needs a different
+command here: `--standalone` and `--server` became global flags (they still
+work after `run`); `run` gained `--worktree` (the playbook makes its own
+worktrees, step 1, so don't use it) and `--archived` (an archived session
+still showed up in `opencode session list` when tried, so it isn't needed
+for cleanup); an inherited, never-closing stdin no longer hung `run` on
+2.3.2 (1/1). Keep `</dev/null` anyway -- it costs nothing and 2.1.4 needs it.
 
 ## Prerequisites
 

@@ -1,32 +1,36 @@
 # delegate-to-opencode
 
-An agent playbook for delegating implementation work to a model via the
-[`opencode`](https://opencode.ai) CLI, while the orchestrating agent stays in
-the planner/reviewer role: it scopes the task, writes the prompt, and reviews
-and iterates on the worker's output before accepting anything -- never
-trusting `opencode`'s exit code or the model's own claims of success without
-independently checking the diff and running real verification.
+An agent playbook for delegating implementation work to cheaper worker models
+while the orchestrating agent stays in the planner/reviewer role. The
+orchestrator scopes the task, writes the prompt, and reviews and iterates on
+the worker's output before accepting anything. It never trusts the worker
+CLI's exit code or the model's own claims of success without checking the
+diff itself and running real verification.
 
-Defaults to the free `opencode/deepseek-v4.1-flash-free` model ($0 cost; chosen
-by a small benchmark of the free models on the author's install, see `SKILL.md`), but any
-model your `opencode` install supports can be used instead -- just say which
-one you want.
+Two worker CLIs are supported:
 
-It can also drive the [Cline](https://cline.bot) CLI as the worker, with Cline's free
-models: see [`references/cline.md`](references/cline.md).
+- [`opencode`](https://opencode.ai) 2.x: [`SKILL.md`](SKILL.md);
+- the [Cline](https://cline.bot) CLI: [`references/cline.md`](references/cline.md),
+  the same playbook with Cline's commands.
 
-Also supports fanning out several isolated `opencode` worker processes in
-parallel for independent subtasks, each in its own git worktree or scratch
-directory with a fresh session and no shared state, with the orchestrating
-agent as the sole coordinator.
+Workers run on **free models by default**. A model counts as free only when
+the tool's own data says so: for opencode, zero cost in its model catalogue
+and listed as available on your machine; for Cline, on Cline's `.free` list,
+and every turn's `totalCost` must come back `0`. Paid models need your explicit
+go-ahead, with the expected number of calls stated first.
 
-## What this actually is
+It also fans out several isolated workers in parallel for independent
+subtasks. Each worker gets its own git worktree or scratch directory and a
+fresh session, with no shared state, and the orchestrating agent is the sole
+coordinator.
 
-All of the real content is [`SKILL.md`](SKILL.md). It ships with Claude Code
-skill frontmatter (so Claude Code auto-discovers and triggers it), but the
-body is plain, agent-agnostic instructions -- any coding agent that can run
-bash and follow a written playbook (Codex, aider, a human at a terminal, ...)
-can use it the same way. Just hand it the file.
+## What's in the repo
+
+| File | What it is |
+|---|---|
+| [`SKILL.md`](SKILL.md) | The playbook, with opencode as the worker. Claude Code skill frontmatter, agent-agnostic body. |
+| [`references/cline.md`](references/cline.md) | What changes when the worker is Cline: commands, free models, what a worker inherits, refinements. |
+| [`references/windows.md`](references/windows.md) | PowerShell translation of the **opencode 1.x** playbook (not yet updated for 2.x, untested on Windows). |
 
 ## Install
 
@@ -39,7 +43,7 @@ ln -s "$(pwd)/delegate-to-opencode" ~/.claude/skills/delegate-to-opencode
 
 Clone it wherever you keep your repos -- the symlink target is what matters,
 not the clone location. Claude Code then picks it up automatically -- ask it
-to delegate something to opencode, or run `/delegate-to-opencode`.
+to delegate something to opencode or Cline, or run `/delegate-to-opencode`.
 
 **Anything else (Codex, aider, a plain terminal session, ...):**
 
@@ -49,14 +53,79 @@ metadata; skip straight to the `# Delegate to opencode` heading.
 
 ## Prerequisites
 
-- `opencode` CLI **2.x** installed and authenticated (`opencode auth login`).
-  Verified on 2.1.4. For opencode 1.x (where `opencode run` still has
-  `--pure` and `--dir`) use the 1.x revision of `SKILL.md`, commit `d937f69`.
-- Nothing to change in your own opencode config: the playbook gives workers a
-  separate, throwaway config directory that only allows non-interactive
-  `read`/`edit`/`bash` and keeps your global plugins, prompts and skills out
-  (see `SKILL.md` for why).
+- **opencode 2.x**, authenticated (`opencode auth login`). Verified on 2.1.4
+  and 2.3.2. For opencode 1.x (where `opencode run` still has `--pure` and
+  `--dir`), use the 1.x revision of `SKILL.md`, commit `d937f69`.
+  You don't need to change your own opencode config. Each worker gets a
+  separate, throwaway config directory: it allows non-interactive
+  `read`/`edit`/`bash` and keeps your global plugins, agent prompts and
+  skills out (see `SKILL.md` for why).
+- **Or the Cline CLI** (verified on 3.0.73-3.0.75), logged in with `cline auth`.
+  Cline keeps its login in its config directory, so a Cline worker runs with
+  your Cline state (plugins, MCP servers, hooks). `references/cline.md` says
+  what to check first.
 - `git`, `jq`, and standard coreutils.
+
+## Free models
+
+`SKILL.md` has a small benchmark of every free, available opencode model on
+the author's machine (2026-11-22, one run per model, so a calibration, not a
+ranking). It tested an implementation task scored by 27 hidden cases and a
+review task with 3 planted defects.
+
+- **Default:** `opencode/deepseek-v4.1-flash-free` (27/27 in 9s).
+- **Second reviewer:** `opencode/big-pickle`, the only model that found all
+  three defects with no debatable finding and also passed the implementation
+  task.
+- **Cline:** the default is the first id on its `.free` list
+  (`cline-free/nemotron-3.5-super-vl` that day).
+
+Free pools have limits, and they run out:
+
+| Pool | Limit seen | Error |
+|---|---|---|
+| OpenCode Zen (`opencode/*-free`) | one quota for every free model of the account; one ~23-minute review turn used it up | `429` `provider.free-limit` |
+| OpenRouter (`openrouter/...:free`) | small daily cap without account credits; one multi-step turn used it up | `429` `free-models-per-day` |
+| NVIDIA (`nvidia/...`) | separate pool, still answering when the two above were spent | -- |
+| Cline (`cline-free/...`) | free promotions end: 5 of 6 ids ended on one day | `Free model promotion ended` |
+
+So check the pools before a large fan-out, spread workers over them, and keep
+each turn bounded. A `410`/`404` (model retired) or a quota `429` means
+switching model or pool, not resending.
+
+## Usage examples
+
+```
+Delegate implementing the CSV export function to opencode.
+
+Use Cline's free model to write tests for the parser module.
+
+Fan out 3 independent free workers to port the utils/ files to TypeScript.
+
+Have a free model from another family review this diff, then verify its findings.
+```
+
+Full behavior, all flags, safety rules, and known operating caveats are
+documented in [`SKILL.md`](SKILL.md) -- read it before relying on this for
+anything important.
+
+## In real use
+
+The playbook was used on a real project (decaf, a Java bytecode runtime in
+Rust plus Python tooling). There, free workers:
+
+- **Wrote a portability fix in three turns.** The fix replaced a Python
+  3.14-only helper with arithmetic that matches 3.11 to 3.14. The third turn
+  corrected a wrong rule in the orchestrator's own prompt, which only
+  running the tests under each Python version exposed.
+- **Drafted a documentation fix.** It worked on the second pool, after the
+  first one's quota ran out.
+- **Gave a cross-model review.** It found one real docstring
+  overstatement that the same-family reviewers had missed.
+
+Every result was reviewed and re-run by the orchestrator before it was kept.
+Each such use also found something to fix in the playbook, and the git log
+records each fix with what was observed.
 
 ## Platform support
 
@@ -64,33 +133,17 @@ Written and tested on Linux (Arch). The playbook is a bash script embedded in
 markdown -- `mktemp`, `awk`, `jq`, `timeout`, heredocs, `$(...)` -- so it needs
 a real POSIX-ish shell.
 
-- **Linux / macOS:** works as documented.
+- **Linux / macOS:** works as documented (macOS untested by the author).
 - **Windows via WSL:** use `SKILL.md` as-is inside a WSL distro (a real Linux
   userspace) -- untested by the author (no Windows machine available), but
-  there's nothing in the playbook that's Linux-specific once you're inside
-  WSL, beyond `opencode` and `jq` needing to be installed *inside* the distro,
-  not the Windows side.
-- **Native Windows (PowerShell, no WSL):** see
-  [`references/windows.md`](references/windows.md) -- a full PowerShell
-  translation of every command block of the **1.x** playbook, same rules and
-  reasoning. It has not been updated for opencode 2.x yet. **Also untested on
-  a real Windows machine** -- it's a careful translation, not a verified
-  port. Issues/PRs from anyone who can actually
-  run it on Windows are genuinely welcome.
-
-## Usage examples
-
-```
-Delegate implementing the CSV export function to opencode.
-
-Use opencode with claude-3-5-haiku to write tests for the parser module.
-
-Fan out 3 independent opencode workers to port the utils/ files to TypeScript.
-```
-
-Full behavior, all flags, safety rules, and known operating caveats are
-documented in [`SKILL.md`](SKILL.md) -- read it before relying on this for
-anything important.
+  nothing in the playbook is Linux-specific once you're inside WSL. The worker
+  CLI and `jq` need to be installed *inside* the distro, not on the Windows
+  side.
+- **Native Windows (PowerShell, no WSL):**
+  [`references/windows.md`](references/windows.md) translates the **1.x**
+  playbook. It lists the changes a 2.x port needs, but has not been updated
+  yet and is **untested on a real Windows machine**. Issues/PRs from anyone
+  who can run it on Windows are welcome.
 
 ## Token savings (rough estimate)
 
@@ -102,8 +155,8 @@ precise.
 The core idea: when you delegate, the orchestrating model only pays for
 scoping the task and reviewing the result -- the delegated model absorbs the
 expensive part (reading context, reasoning through the implementation,
-generating the code) at whatever the delegated model's own cost is (with the
-default model, $0). The more expensive the orchestrating model's own
+generating the code) at whatever the delegated model's own cost is (with a
+free model, $0). The more expensive the orchestrating model's own
 reasoning would have been, the more there is to save by not spending it.
 
 Rough range for a medium, well-scoped task (a function plus tests, clear
@@ -116,33 +169,34 @@ spec), **in the success case**:
 | Mid-size model, default | 3,000-8,000 | 2,000-4,000 | ~30-45% |
 | Small/fast model, low effort | 1,500-4,000 | 1,200-2,500 | ~15-30% |
 
-**The success case is doing a lot of work in that table.** In real testing
-against the free default model during this project's own development, 2 of 9
-real tool-use delegation attempts actually completed before a timeout (see
-Known limitation below). Every failed attempt still costs the scoping prompt
-and the time spent waiting before falling back to doing the work directly --
-so the *expected* savings, weighted by observed success rate, are
-meaningfully lower than the table above, and can go negative for small tasks
-delegated speculatively. The "Is this task a fit for delegation?" section in
-`SKILL.md` exists specifically to keep you on the winning side of that
-math -- it's not boilerplate, use it as a real filter.
+**The success case is doing a lot of work in that table.** On opencode 1.x,
+during this project's early development, 2 of 9 real tool-use delegation
+attempts completed before a timeout. Some of those failures may have been the stdin
+hang described below, which the playbook now avoids, but a failed attempt
+still costs the scoping prompt and the wait. So expected savings are lower
+than the table, and can go negative for small tasks delegated speculatively.
+The "Is this task a fit for delegation?" section in `SKILL.md` exists to keep
+you on the winning side of that math -- use it as a real filter.
 
-## Known limitation
+## Known limitations
 
-Earlier revisions documented `opencode run` hanging indefinitely -- no
-output, no error, no exit -- with no known cause. On opencode 2.1.4 the
-bootstrap hang has a reproducible cause: `opencode run` reads stdin when it
-isn't a terminal and waits for it to close, and under an agent's shell tool
-stdin is usually an open pipe or socket that never closes. Same command,
-same machine: inherited stdin hung 2/2 until the timeout, `</dev/null`
-finished 2/2 in about two seconds. The playbook now always closes stdin.
-
-Free and shared backends can still stall **mid-turn**, sometimes after the
-target file was already edited correctly on disk. So every delegation turn
-is still **supervised** rather than run under a fixed timeout: it waits
-while the worker's own event stream and server log are moving, kills it once
-they go quiet, and inspects the worktree before concluding nothing happened.
-See step 2 of `SKILL.md` for the full mechanism.
+- **Bootstrap hang (opencode 2.1.4).** `opencode run` reads stdin when it
+  isn't a terminal and waits for it to close. Under an agent's shell tool,
+  stdin is usually an open pipe or socket that never closes. Same command,
+  same machine: inherited stdin hung 2/2 until the timeout, while `</dev/null`
+  finished 2/2 in about two seconds. On 2.3.2 an inherited stdin didn't hang
+  (1/1). The playbook always closes stdin.
+- **Mid-turn stalls.** Free and shared backends can still stall mid-turn,
+  sometimes after the target file was already edited correctly on disk. So
+  every turn is **supervised** rather than run under a fixed timeout: it
+  waits while the worker's own event stream and server log are moving, kills
+  it once they go quiet, and inspects the worktree before concluding nothing
+  happened (step 2 of `SKILL.md`).
+- **Cline workers aren't config-isolated.** Isolating them would drop the
+  login, so they inherit your Cline plugins, MCP servers and hooks.
+- **Cline can't continue a session non-interactively.** A refinement is a
+  fresh turn whose prompt carries the context.
+- **Free quotas are small.** See the table above.
 
 ## License
 
