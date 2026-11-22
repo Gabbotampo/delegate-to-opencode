@@ -702,6 +702,24 @@ git -C "$REPO_ROOT" branch -D "opencode/$LABEL"   # optional, if you don't want 
 For a non-repo scratch task, just copy out whatever's worth keeping and
 `rm -rf "$WORKTREE_DIR"`.
 
+**Then delete the worker's session.** Every turn leaves a session in
+opencode's database, and a fan-out leaves dozens (observed: 64 after one
+day). Once a worker is finished -- its result integrated or discarded, no
+refinement turn coming -- delete the sessions it made, using the ids from
+its own turn streams (step 3), never by title or "latest":
+
+```bash
+for f in "$RUN_LOG_DIR"/turn*.out.json; do
+  awk '/^\{/{f=1} f' "$f" | jq -r 'select(.sessionID) | .sessionID'
+done | sort -u | while read -r s; do
+  opencode session delete --standalone "$s" </dev/null
+done
+```
+
+Not after each turn: a refinement (`-s`) needs the session. One-shot workers
+(an oracle capture, a scout, a review) can be cleaned right after their only
+turn. Never delete sessions you didn't create.
+
 ## Parallel workers
 
 Each independent subtask gets its own `LABEL`, its own worktree/scratch dir

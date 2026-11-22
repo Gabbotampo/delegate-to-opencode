@@ -134,6 +134,17 @@ To record which session a turn was (for the user, or to export it):
 cline history --json </dev/null | jq -r --arg c "$WORKTREE_DIR" '[.[] | select(.cwd==$c)] | .[-1].sessionId'
 ```
 
+## Cleanup
+
+When a Cline worker is finished, delete its history entries: only those whose
+`cwd` is that worker's `$WORKTREE_DIR`, never the user's own sessions.
+
+```bash
+cline history --json --limit 500 </dev/null \
+  | jq -r --arg c "$WORKTREE_DIR" '.[] | select(.cwd==$c and .status!="running") | .sessionId' \
+  | while read -r s; do cline history delete --session-id "$s" </dev/null; done
+```
+
 ## Flags
 
 | Flag | Use | Why |
