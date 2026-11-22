@@ -104,8 +104,8 @@ for cleanup); an inherited, never-closing stdin no longer hung `run` on
 - `git`, `jq`, and standard coreutils (`mktemp`, `awk`, `timeout`) available --
   a real POSIX-ish shell. On Windows this means running inside WSL and using
   this file as-is; on native Windows without WSL,
-  [`references/windows.md`](references/windows.md) has a PowerShell
-  translation -- but it still follows the 1.x CLI (see its header).
+  [`references/windows.md`](references/windows.md) has a PowerShell 7
+  translation of this 2.x playbook (not yet run on a real Windows machine).
 
 ### The three things every 2.x invocation needs
 

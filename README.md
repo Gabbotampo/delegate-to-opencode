@@ -30,7 +30,7 @@ coordinator.
 |---|---|
 | [`SKILL.md`](SKILL.md) | The playbook, with opencode as the worker. Claude Code skill frontmatter, agent-agnostic body. |
 | [`references/cline.md`](references/cline.md) | What changes when the worker is Cline: commands, free models, what a worker inherits, refinements. |
-| [`references/windows.md`](references/windows.md) | PowerShell translation of the **opencode 1.x** playbook (not yet updated for 2.x, untested on Windows). |
+| [`references/windows.md`](references/windows.md) | PowerShell 7 translation of the opencode 2.x playbook (untested on a real Windows machine). |
 
 ## Install
 
@@ -139,11 +139,11 @@ a real POSIX-ish shell.
   nothing in the playbook is Linux-specific once you're inside WSL. The worker
   CLI and `jq` need to be installed *inside* the distro, not on the Windows
   side.
-- **Native Windows (PowerShell, no WSL):**
-  [`references/windows.md`](references/windows.md) translates the **1.x**
-  playbook. It lists the changes a 2.x port needs, but has not been updated
-  yet and is **untested on a real Windows machine**. Issues/PRs from anyone
-  who can run it on Windows are welcome.
+- **Native Windows (PowerShell 7, no WSL):**
+  [`references/windows.md`](references/windows.md) translates the **2.x** playbook
+  (isolated config, closed stdin, `--standalone`, the supervisor, session ids from the
+  event stream, free checks, cleanup), with no `jq` dependency. It is **untested on a
+  real Windows machine**: issues/PRs from anyone who can run it there are welcome.
 
 ## Token savings (rough estimate)
 

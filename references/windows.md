@@ -1,271 +1,225 @@
 # Windows (PowerShell, no WSL)
 
-> **Still the opencode 1.x translation.** `SKILL.md` now targets opencode
-> 2.x, whose `opencode run` no longer has `--pure`, `--dir`, `--attach` or
-> `--port`. Before using this file with 2.x, apply the same changes
-> `SKILL.md` describes: close stdin (`$null | opencode run ...` or
-> `-RedirectStandardInput` from an empty file), pass `--standalone`, start the
-> process with the workspace as its working directory instead of `--dir`, set
-> `OPENCODE_CONFIG_DIR` to a clean config directory instead of `--pure`, and
-> read the session id from the turn's own event stream.
+The opencode **2.x** playbook of [`SKILL.md`](../SKILL.md), translated to native PowerShell
+for a Windows setup without WSL. The rules, the reasoning and the safety boundaries are the
+same, and they live in `SKILL.md`: read it first for the *why* (is the task a fit,
+boundaries, never-trust-blindly review, free-model checks, quotas). This file only
+translates the *commands*.
 
-Same rules, same reasoning, same safety boundaries as [`SKILL.md`](../SKILL.md)
--- read that file first for the *why* (Is this task a fit, Boundaries,
-never-trust-blindly review, the timeout/hang caveat, the cost guard for
-non-free models). This file only translates the *commands* to native
-PowerShell, for a setup without WSL.
-
-**Not verified on a real Windows machine** -- the author has no Windows
-machine to test on. This is a careful, mechanical translation of the same
-logic that's been tested on Linux, not a confirmed working port. Treat it
-with the same "unverified" caution this project applies to its own claims
-elsewhere. Issues and PRs from anyone who can actually run this on Windows
-are genuinely welcome -- especially around `opencode`'s config/cache paths,
-which the author could not confirm (see Prerequisites).
+**Not verified on a real Windows machine.** The author has no Windows machine. This is a
+careful translation of logic that is verified on Linux with opencode 2.1.4 and 2.3.2, not a
+confirmed working port. Treat it with the same "unverified" caution as anything else this
+project hasn't run. Issues and PRs from anyone who can run it on Windows are welcome,
+especially about opencode's paths there and about the `.cmd` shim note below.
 
 ## Prerequisites (Windows-specific)
 
 Same as `SKILL.md`'s Prerequisites, plus:
 
-- `opencode`, `git`, and `jq` all need **native Windows builds** installed
-  and on `PATH` -- a WSL-only install of any of them won't be visible here.
-  `winget`, `scoop`, and `choco` all package `git` and `jq`; see
-  https://opencode.ai for `opencode` itself.
-- opencode's own config/cache paths on Windows are not confirmed by the
-  author. Run `opencode debug paths` after installing and use whatever it
-  reports -- don't assume `%LOCALAPPDATA%\opencode\...` or guess.
+- **PowerShell 7 or later** (`pwsh`). The worker launcher below uses .NET's
+  `ProcessStartInfo.ArgumentList`, which quotes each argument correctly. Windows
+  PowerShell 5.1's `Start-Process -ArgumentList` joins arguments with spaces and breaks
+  any prompt that contains spaces or quotes.
+- **A native `opencode.exe`** on `PATH` (the release binary, or scoop/winget). An npm
+  install puts an `opencode.cmd` shim on `PATH`. A `.cmd` goes through `cmd.exe`, which has
+  its own quoting rules, so a long prompt passed as an argument may arrive mangled. If
+  `(Get-Command opencode).Source` ends in `.cmd`, point `$OpencodeExe` below at the real
+  executable that the shim calls.
+- `git` on `PATH`. `jq` is **not** needed here: the JSON is read with `ConvertFrom-Json`.
+- opencode's paths on Windows are not confirmed by the author. Always ask the tool with
+  `opencode debug paths` (the helper below does), and never assume `%LOCALAPPDATA%\...`.
 
 ## Shared helpers
 
-Two small functions used throughout below -- define them once per session.
-
-**Timeout-bounded process launch.** PowerShell has no direct equivalent of
-GNU `timeout`. This starts a process, waits up to `$TimeoutSecs`, kills it if
-still running, and returns an exit code -- **124 on a timeout-kill, matching
-the exit-code convention `SKILL.md` documents**, so "if the exit code is 124
-or non-zero" guidance means the same thing on both platforms. Used for the
-smoke test only; real delegation turns use `Invoke-Supervised` below:
+Define these once per session.
 
 ```powershell
-function Invoke-WithTimeout {
-    param(
-        [string]$FilePath,
-        [string[]]$ArgumentList,
-        [int]$TimeoutSecs,
-        [string]$StdOutFile,
-        [string]$StdErrFile
-    )
-    $proc = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList `
-        -NoNewWindow -PassThru `
-        -RedirectStandardOutput $StdOutFile -RedirectStandardError $StdErrFile
-    if (-not $proc.WaitForExit($TimeoutSecs * 1000)) {
-        $proc.Kill()
-        return 124
+$OpencodeExe = (Get-Command opencode).Source   # see the .cmd note above
+
+# The isolated worker config directory (SKILL.md "Prerequisites"): only a permission block,
+# so the user's global plugins, agent prompts and skills never load into a worker.
+$OcConfigDir = Join-Path ([System.IO.Path]::GetTempPath()) ("oc-cfg-" + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $OcConfigDir | Out-Null
+@'
+{ "$schema": "https://opencode.ai/config.json",
+  "permission": { "read": "allow", "edit": "allow", "bash": "allow" } }
+'@ | Set-Content -Path (Join-Path $OcConfigDir 'opencode.json') -Encoding utf8NoBOM
+
+# The environment every worker gets (SKILL.md "The three things every 2.x invocation needs"
+# and "Put resource limits in the worker's environment"). Add build limits for the project,
+# e.g. CARGO_TARGET_DIR, CARGO_PROFILE_DEV_DEBUG=0, CARGO_BUILD_JOBS=1 for a Rust project.
+$WorkerEnv = @{
+    OPENCODE_CONFIG_DIR          = $OcConfigDir
+    OPENCODE_DISABLE_CLAUDE_CODE = '1'
+    OPENCODE_DISABLE_AUTOUPDATE  = '1'
+}
+
+# opencode's own directories, as the tool reports them ("data", "cache", "log", ...).
+function Get-OcPath([string]$Name) {
+    $line = $null | & $OpencodeExe debug paths | Where-Object { $_ -match "^$Name\s" } | Select-Object -First 1
+    if ($line) { ($line -split '\s+', 2)[1].Trim() }
+}
+
+# One JSON event per line, after any startup banner (the `awk '/^\{/{f=1} f'` of SKILL.md).
+function Read-Events([string]$Path) {
+    if (-not (Test-Path $Path)) { return @() }
+    $started = $false
+    foreach ($line in [System.IO.File]::ReadAllLines($Path)) {
+        if (-not $started -and $line.TrimStart().StartsWith('{')) { $started = $true }
+        if ($started -and $line.Trim()) { try { $line | ConvertFrom-Json } catch { } }
     }
-    return $proc.ExitCode
 }
 ```
 
-**Supervised launch (progress-aware).** The equivalent of `SKILL.md` step 2's
-supervise loop -- read that section for the reasoning (why a fixed deadline
-answers the wrong question, and the two signals: the `step_finish` /
-`part.reason == "stop"` terminal event, plus opencode's internal log as a
-liveness feed). Returns one of the same four outcome strings:
+`$null |` in front of a direct native call gives it an empty, closed stdin, the
+PowerShell form of `</dev/null`. On 2.1.4 `opencode run` hung forever on an open stdin
+(see `SKILL.md`); keep it on every call.
+
+### Start, stop and supervise a worker
 
 ```powershell
-function Invoke-Supervised {
-    param(
-        [string[]]$ArgumentList,
-        [string]$StdOutFile, [string]$StdErrFile,
-        [string]$WorktreeDir, [string]$LogFile,
-        [int]$PollSecs = 5, [int]$StallSecs = 120, [int]$MaxTotalSecs = 900
-    )
-    $logMark = (Get-Content $LogFile | Measure-Object -Line).Lines
-    $proc = Start-Process -FilePath "opencode" -ArgumentList $ArgumentList `
-        -NoNewWindow -PassThru `
-        -RedirectStandardOutput $StdOutFile -RedirectStandardError $StdErrFile
+# Start opencode with: the workspace as its working directory (2.x has no --dir), its own
+# environment, stdin closed at once, stdout/stderr copied to files.
+function Start-Worker {
+    param([string]$WorktreeDir, [string[]]$Arguments, [string]$OutFile, [string]$ErrFile)
+    $psi = [System.Diagnostics.ProcessStartInfo]::new($OpencodeExe)
+    foreach ($a in $Arguments) { $psi.ArgumentList.Add($a) }
+    $psi.WorkingDirectory = $WorktreeDir
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    foreach ($k in $WorkerEnv.Keys) { $psi.Environment[$k] = $WorkerEnv[$k] }
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $p.StandardInput.Close()
+    $out = [System.IO.File]::Open($OutFile, 'Create', 'Write', 'ReadWrite')
+    $err = [System.IO.File]::Open($ErrFile, 'Create', 'Write', 'ReadWrite')
+    [pscustomobject]@{
+        Process = $p; Out = $out; Err = $err
+        Copies  = @($p.StandardOutput.BaseStream.CopyToAsync($out),
+                    $p.StandardError.BaseStream.CopyToAsync($err))
+    }
+}
 
-    $runId = $null; $lastCount = 0; $lastOutSize = 0
-    $start = Get-Date; $lastProgress = Get-Date
+# The private server is a child process (opencode serve --stdio): kill the whole tree.
+function Stop-Worker($W) {
+    if (-not $W.Process.HasExited) {
+        try { $W.Process.Kill($true) } catch { }
+        $W.Process.WaitForExit(5000) | Out-Null
+    }
+}
 
+function Close-WorkerFiles($W) {
+    try { [System.Threading.Tasks.Task]::WaitAll($W.Copies, 5000) | Out-Null } catch { }
+    $W.Out.Dispose(); $W.Err.Dispose()
+}
+
+# SKILL.md turn_complete: a step_finish with reason "stop", or, once the process has exited
+# with 0, a final "text" event (2.x does not always emit the stop event).
+function Test-TurnComplete([string]$OutFile, $ExitCode) {
+    $ev = @(Read-Events $OutFile)
+    if ($ev | Where-Object { $_.type -eq 'step_finish' -and $_.part.reason -eq 'stop' }) { return $true }
+    return ($ExitCode -eq 0 -and $ev.Count -gt 0 -and $ev[-1].type -eq 'text')
+}
+
+# SKILL.md run_turn: one supervised turn. Returns @{ Outcome; ExitCode }.
+function Invoke-Turn {
+    param([string]$WorktreeDir, [string]$OutFile, [string]$ErrFile, [string[]]$Extra,
+          [int]$PollSecs = 5, [int]$StallSecs = 300, [int]$MaxTotalSecs = 1200)
+    $runArgs = @('run', '--standalone', '--print-logs', '--log-level', 'info',
+              '-m', $Model, '--format', 'json') + $Extra
+    $w = Start-Worker -WorktreeDir $WorktreeDir -Arguments $runArgs -OutFile $OutFile -ErrFile $ErrFile
+    $start = Get-Date; $last = Get-Date; $lo = 0; $le = 0; $outcome = $null
     while ($true) {
-        if ($proc.HasExited) {
-            # Exiting is not succeeding -- a run can die in seconds having
-            # done nothing. Only the terminal event means "finished".
-            $j = Get-JsonOutput -Path $StdOutFile -StartChar '{'
-            if ($j) {
-                $j | jq -s -e 'any(.[]; .type=="step_finish" and .part.reason=="stop")' 2>$null | Out-Null
-                if ($LASTEXITCODE -eq 0) { return "exited-complete" }
-            }
-            return "exited-incomplete"
+        if ($w.Process.HasExited) {
+            Close-WorkerFiles $w
+            $rc = $w.Process.ExitCode
+            $outcome = if (Test-TurnComplete $OutFile $rc) { 'exited-complete' } else { 'exited-incomplete' }
+            return @{ Outcome = $outcome; ExitCode = $rc }
         }
         Start-Sleep -Seconds $PollSecs
-
-        # Signal 1: our run's lines in the shared log. Match `directory=` as a
-        # FIELD, never as a bare substring -- see SKILL.md: opencode lists every
-        # worktree of a project in one line, so a substring match makes parallel
-        # workers on one repo adopt each other's run ids.
-        $newLines = Get-Content $LogFile | Select-Object -Skip $logMark
-        if (-not $runId) {
-            $needle = "directory=$WorktreeDir"
-            $hit = $newLines | Where-Object {
-                     $_.Contains($needle) -and
-                     ($_.Substring($_.IndexOf($needle) + $needle.Length) -match '^(\s|$)')
-                   } | Select-Object -First 1
-            if ($hit -and $hit -match 'run=([a-f0-9]+)') { $runId = $Matches[1] }
-        }
-        $count = 0
-        if ($runId) { $count = ($newLines | Select-String -SimpleMatch "run=$runId").Count }
-
-        # Signal 2: the event stream growing -- moves during LLM calls, when
-        # the log is silent. Either signal moving counts as progress.
-        $outSize = 0
-        if (Test-Path $StdOutFile) { $outSize = (Get-Item $StdOutFile).Length }
-
-        if ($count -gt $lastCount -or $outSize -gt $lastOutSize) {
-            $lastCount = $count; $lastOutSize = $outSize; $lastProgress = Get-Date
-        }
-
-        # Terminal event: model says this turn is done.
-        $json = Get-JsonOutput -Path $StdOutFile -StartChar '{'
-        if ($json) {
-            $json | jq -s -e 'any(.[]; .type=="step_finish" and .part.reason=="stop")' 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                Start-Sleep -Seconds 2
-                Stop-Worker $proc
-                return "signalled-complete"
-            }
-        }
-
-        if (((Get-Date) - $lastProgress).TotalSeconds -ge $StallSecs) {
-            Stop-Worker $proc; return "stalled-no-progress"
-        }
-        if (((Get-Date) - $start).TotalSeconds -ge $MaxTotalSecs) {
-            Stop-Worker $proc; return "max-deadline"
+        $o = $w.Out.Length; $e = $w.Err.Length
+        if ($o -gt $lo -or $e -gt $le) { $lo = $o; $le = $e; $last = Get-Date }
+        $outcome = if (Test-TurnComplete $OutFile $null) { 'signalled-complete' }
+                   elseif (((Get-Date) - $last).TotalSeconds -ge $StallSecs) { 'stalled-no-progress' }
+                   elseif (((Get-Date) - $start).TotalSeconds -ge $MaxTotalSecs) { 'max-deadline' }
+        if ($outcome) {
+            if ($outcome -eq 'signalled-complete') { Start-Sleep -Seconds 2 }
+            Stop-Worker $w; Close-WorkerFiles $w
+            return @{ Outcome = $outcome; ExitCode = $null }
         }
     }
 }
 ```
 
-`Stop-Worker` closes the main window first and escalates to a hard kill --
-a wedged process may not go quietly, and the whole point of supervising is to
-never be left waiting on one:
-
-```powershell
-function Stop-Worker {
-    param($Proc)
-    if ($Proc.HasExited) { return }
-    $Proc.CloseMainWindow() | Out-Null
-    if (-not $Proc.WaitForExit(5000)) { $Proc.Kill() }
-}
-```
-
-Same `StallSecs` tuning note as `SKILL.md`: 120s suits the free default, raise
-it for slow or reasoning-heavy models -- killing healthy work mid-thought is
-worse than waiting, since it's indistinguishable from a real stall.
-
-`$LogFile` is `opencode.log` inside the log directory that
-`opencode debug paths` reports (see Prerequisites -- don't guess the path).
-
-**Skip to the real JSON**, the same way `SKILL.md` uses `awk '/^\{/{f=1} f'`
-to drop a shell startup banner before opencode's actual output -- parameterized
-by the expected first character (`{` for `opencode run`, `[` for
-`opencode session list`):
-
-```powershell
-function Get-JsonOutput {
-    param([string]$Path, [char]$StartChar)
-    $started = $false
-    $lines = foreach ($line in Get-Content $Path) {
-        if ($line.TrimStart().StartsWith($StartChar)) { $started = $true }
-        if ($started) { $line }
-    }
-    return ($lines -join "`n")
-}
-```
-
-## 0. Smoke-test opencode (once per session, not per worker)
-
-Same purpose as `SKILL.md` step 0 -- confirm opencode is responding before
-committing a real task's time budget to it:
-
-```powershell
-$smokeDir = Join-Path $env:TEMP ([System.IO.Path]::GetRandomFileName())
-New-Item -ItemType Directory -Path $smokeDir | Out-Null
-$smokeOut = Join-Path $env:TEMP "opencode-smoke.out.json"
-$smokeErr = Join-Path $env:TEMP "opencode-smoke.err.log"
-
-$SmokeExit = Invoke-WithTimeout -FilePath "opencode" -TimeoutSecs 30 `
-    -ArgumentList @(
-        "run", "Reply with exactly the single word OK and do nothing else. Do not read, create, or edit any files.",
-        "-m", $Model, "--format", "json", "--pure",
-        "--dir", $smokeDir, "--title", "smoke-test"
-    ) `
-    -StdOutFile $smokeOut -StdErrFile $smokeErr
-```
-
-If `$SmokeExit` isn't `0`, same rule as `SKILL.md`: don't proceed with real
-delegation, tell the user opencode isn't responding reliably right now.
+`StallSecs` follows `SKILL.md`: 300s by default because an LLM call shows no progress
+until it finishes, and **longer than the longest single command** the worker will run
+(a slow build is silent until it ends).
 
 ## Model selection
 
-Same default and override rule as `SKILL.md`:
+Same default and rules as `SKILL.md`:
 
 ```powershell
-$Model = "opencode/nemotron-3-ultra-free"   # override if the user asked for a specific model
+$Model = 'opencode/deepseek-v4.1-flash-free'   # override if the user asked for a specific model
 ```
 
-**Cost guard for non-default models**, reusing the same `jq` query
-`SKILL.md` uses (only the variable-passing syntax changes) -- run this
-before using any model that isn't a known-free default:
+**Free check:** listed by `opencode models` and priced at zero in the catalogue (a `-free`
+name alone is not proof). Run it for the default too:
 
 ```powershell
 $Provider, $ModelId = $Model -split '/', 2
-# $modelsCache: path from `opencode debug paths` on your system -- see Prerequisites
-$IsFree = jq -r --arg p $Provider --arg m $ModelId '
-  .[]? | select(.id==$p) | .models[$m]?.cost? |
-  if . == null then "unknown"
-  elif (.input==0 and .output==0) then "free"
-  else "paid" end
-' $modelsCache
+$catalogue = Get-Content (Join-Path (Get-OcPath 'cache') 'models.json') -Raw | ConvertFrom-Json
+$cost = $catalogue.$Provider.models.$ModelId.cost
+$IsFree = if ($null -eq $cost) { 'unknown' }
+          elseif ($cost.input -eq 0 -and $cost.output -eq 0) { 'free' } else { 'paid' }
+if (-not (($null | & $OpencodeExe models) -contains $Model)) { $IsFree = 'unavailable' }
 ```
 
-If `$IsFree` isn't `free`, same rule as `SKILL.md`: tell the user which model
-you're about to use, that it isn't confirmed free, and roughly how many
-invocations to expect -- then get an explicit go-ahead before the first real
-invocation. Skip this check only for `opencode/nemotron-3-ultra-free` and
-`opencode/nemotron-3.5-lightning-free`.
+Anything other than `free`: same rule as `SKILL.md` (tell the user, get a go-ahead first).
 
-## Process (applies per worker -- one worker is just N=1)
+## 0. Smoke test, service state, home marker (once per session)
+
+```powershell
+# The helper commands (opencode models / debug paths) can start the shared background
+# service and leave it running: note its state first, stop it at the end if it was stopped.
+$ServiceBefore = ($null | & $OpencodeExe service status | Select-Object -First 1)
+
+# Files created in the user's home after this point are checked after every wave (step 4).
+$HomeMark = Get-Date
+
+$SmokeDir = Join-Path ([System.IO.Path]::GetTempPath()) ("oc-smoke-" + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $SmokeDir | Out-Null
+$smoke = Invoke-Turn -WorktreeDir $SmokeDir -OutFile "$SmokeDir.out.json" -ErrFile "$SmokeDir.err.log" `
+    -Extra @('--title', "smoke-test-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())",
+             'Reply with exactly the single word OK and do nothing else. Do not read, create, or edit any files.') `
+    -MaxTotalSecs 60
+Read-Events "$SmokeDir.out.json" | Where-Object type -eq 'error' |
+    ForEach-Object { "$($_.error.status) $($_.error.type) $($_.error.message)" }
+(Select-String -Path "$SmokeDir.err.log" -SimpleMatch 'loading plugin').Count   # must be 0
+```
+
+Error events mean the same as in `SKILL.md`: `410`/`404` (model retired or unknown) and
+`401`/`403` are permanent; a `429` with type `provider.free-limit` or the message
+`free-models-per-day` is a quota (switch pool); other `429`s and `5xx` are transient.
+
+## Process (per worker)
 
 ### 1. Scope the task and isolate a workspace
-
-Repo-based task -- isolate with a worktree, kept outside the repo:
-
-`$Label` must be unique per run (step 1 of `SKILL.md` explains why: the
-session lookup requires exactly one title+directory match):
 
 ```powershell
 $RepoRoot = git rev-parse --show-toplevel
 $Label = "json-import-fix-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
-
-$WorktreeParent = Join-Path $env:TEMP ([System.IO.Path]::GetRandomFileName())
-New-Item -ItemType Directory -Path $WorktreeParent | Out-Null
-$WorktreeDir = Join-Path $WorktreeParent $Label
+$WorktreeDir = Join-Path ([System.IO.Path]::GetTempPath()) ("oc-wt-" + [guid]::NewGuid()) | Join-Path -ChildPath $Label
 git -C $RepoRoot worktree add -b "opencode/$Label" $WorktreeDir
-
-$RunLogDir = Join-Path $env:TEMP ([System.IO.Path]::GetRandomFileName())
+$RunLogDir = Join-Path ([System.IO.Path]::GetTempPath()) ("oc-log-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $RunLogDir | Out-Null
 ```
 
-Same note as `SKILL.md`: a fresh worktree only has committed history -- get
-uncommitted changes committed first (with the user's awareness) if the task
-needs them.
+`$Model` keeps whatever Model selection set: don't reassign it here. A fresh worktree only
+has committed history. Non-repo task: use a fresh temp directory as `$WorktreeDir`.
 
-Non-repo / standalone task -- skip the `git worktree` lines, just use a
-fresh temp directory as `$WorktreeDir`.
-
-### 2. First turn -- always a fresh session, always supervised
+### 2. First turn
 
 ```powershell
 $prompt = @'
@@ -274,192 +228,112 @@ Follow the existing conventions in <specific file to mirror>, attached below.
 Acceptance: running `<exact test/build command>` in this directory must pass.
 Do one focused turn and then stop -- do not schedule or defer any follow-up work.
 '@
-
-$turn1Out = Join-Path $RunLogDir "turn1.out.json"
-$turn1Err = Join-Path $RunLogDir "turn1.err.log"
-
-$Outcome = Invoke-Supervised `
-    -ArgumentList @(
-        "run", $prompt, "-m", $Model, "--format", "json", "--pure",
-        "--dir", $WorktreeDir, "--title", $Label
-    ) `
-    -StdOutFile $turn1Out -StdErrFile $turn1Err `
-    -WorktreeDir $WorktreeDir -LogFile $LogFile
+$t1 = Invoke-Turn -WorktreeDir $WorktreeDir `
+    -OutFile (Join-Path $RunLogDir 'turn1.out.json') -ErrFile (Join-Path $RunLogDir 'turn1.err.log') `
+    -Extra @('--title', $Label, '-f', '<absolute\path\to\spec-or-example-file>', $prompt)
+$t1.Outcome
 ```
 
-`$Outcome` is one of `signalled-complete`, `exited-complete`,
-`exited-incomplete`, `stalled-no-progress`, `max-deadline` -- act on it
-exactly as the outcome table in `SKILL.md` step 2 describes. Note especially
-that `exited-incomplete` is a failure: a run can exit within seconds having
-done nothing, so a plain exit is never proof of success. In particular, on a stall or deadline,
-**check `$WorktreeDir` for the requested file(s) before deciding anything**:
-opencode has been observed to hang both during bootstrap (nothing done) and
-mid-turn (edit already correctly written to disk). Don't discard work just
-because the process misbehaved.
+Act on `$t1.Outcome` exactly as the outcome table in `SKILL.md` step 2 says. On any
+non-completion, read `$WorktreeDir` before deciding: a stalled worker may already have
+written correct work.
+
+### 3. Session id, from the turn's own events
 
 ```powershell
-$turn1Json = Get-JsonOutput -Path $turn1Out -StartChar '{'
+$SessionId = @(Read-Events (Join-Path $RunLogDir 'turn1.out.json') |
+    Where-Object { $_.sessionID } | ForEach-Object sessionID | Sort-Object -Unique)
+if ($SessionId.Count -ne 1) { $SessionId = 'LOOKUP_FAILED' } else { $SessionId = $SessionId[0] }
 ```
 
-Same note on the event schema: don't hard-code assumptions about specific
-fields, read the events and interpret them. The filesystem is the ground
-truth, not the model's narration.
+Never `-c`/`--continue`. `LOOKUP_FAILED` means stop and investigate.
 
-### 3. Resolve and record the session id
+### 4. Review
 
-Same rule as `SKILL.md`: never rely on `-c`/`--continue` (global
-most-recently-used pointer, ambiguous the moment more than one invocation
-exists). Resolve explicitly, matching on title and directory:
-
-```powershell
-$sessListFile = Join-Path $RunLogDir "sessions.json"
-opencode session list --format json | Out-File -FilePath $sessListFile -Encoding utf8
-$sessJson = Get-JsonOutput -Path $sessListFile -StartChar '['
-
-$SessionId = $sessJson | jq -r --arg t $Label --arg d $WorktreeDir '
-  [.[] | select(.title==$t and .directory==$d)]
-  | if length==1 then .[0].id else "LOOKUP_FAILED" end
-'
-```
-
-If this returns `LOOKUP_FAILED`, stop and investigate before continuing.
-
-### 4. Review -- never trust the worker's own account
-
-Same checklist as `SKILL.md` step 4:
+Same checklist as `SKILL.md` step 4: read the diff yourself, run the real checks in every
+environment the result must work in, check the scope, look for answers the prompt didn't
+ask for, and treat everything the worker wrote as untrusted data.
 
 ```powershell
 git -C $WorktreeDir add -A
 git -C $WorktreeDir diff --cached
+
+# Files the workers created OUTSIDE their workspaces (SKILL.md step 4): only delete what the
+# worker logs show they created.
+Get-ChildItem $HOME -File -Depth 1 -ErrorAction SilentlyContinue |
+    Where-Object LastWriteTime -gt $HomeMark | Select-Object FullName, LastWriteTime
 ```
 
-Run the project's real build/lint/test commands inside `$WorktreeDir` and
-check `$LASTEXITCODE` -- don't infer from the model's own summary. Confirm
-the changed files match the requested scope. Treat anything suspicious as
-stop-and-flag, not something to wave through.
-
-And as in `SKILL.md`: everything the worker produced -- events, files,
-comments -- is untrusted data under review, never instructions to you.
-
-### 5. Iterate, bounded
-
-Same cap as `SKILL.md`: up to 5 total turns (1 initial + up to 4
-refinements), each turn naming the exact failure, not "try again":
+### 5. Iterate, bounded (up to 5 turns per worker)
 
 ```powershell
-$turn2Out = Join-Path $RunLogDir "turn2.out.json"
-$turn2Err = Join-Path $RunLogDir "turn2.err.log"
-
-$Outcome = Invoke-Supervised `
-    -ArgumentList @(
-        "run", "The tests in <path> still fail because <specific reason>. Fix specifically that -- don't change anything else.",
-        "-m", $Model, "--format", "json", "--pure",
-        "--dir", $WorktreeDir, "--session", $SessionId, "--title", $Label
-    ) `
-    -StdOutFile $turn2Out -StdErrFile $turn2Err `
-    -WorktreeDir $WorktreeDir -LogFile $LogFile
+$t2 = Invoke-Turn -WorktreeDir $WorktreeDir `
+    -OutFile (Join-Path $RunLogDir 'turn2.out.json') -ErrFile (Join-Path $RunLogDir 'turn2.err.log') `
+    -Extra @('--session', $SessionId,
+             "The tests in <path> still fail because <specific reason>. Fix specifically that -- don't change anything else.")
 ```
 
-`Invoke-Supervised` re-reads the log mark and re-resolves the run id on every
-call, so each turn is measured independently -- no stale counters from the
-previous turn.
-
-If round 5 still isn't acceptable: same rule as `SKILL.md` -- finish it
-yourself, or tell the user plainly what was tried and why it isn't
-converging. Never silently give up, never claim success that didn't happen.
-
-### 6. Integrate or discard
-
-Check the target repo is clean first -- the user may have their own
-uncommitted work that a patch would conflict with or bury:
+### 6. Integrate, clean up, delete the sessions
 
 ```powershell
-git -C $RepoRoot status --porcelain
-```
-
-If that's non-empty, stop and surface it; let the user commit or stash. Don't
-stash on their behalf.
-
-With a clean tree, check what's staged first -- your own verification runs may
-have created build artifacts that aren't part of the worker's result:
-
-```powershell
+git -C $RepoRoot status --porcelain          # must be empty before touching it
 git -C $WorktreeDir add -A
-git -C $WorktreeDir diff --cached --name-status
-# unstage anything that isn't work product, e.g.:
-# git -C $WorktreeDir restore --staged '__pycache__'
-```
-
-Then produce and apply. `--binary` is required (see `SKILL.md`: without it a
-patch touching any binary file is rejected as lacking a full index line):
-
-```powershell
-$finalDiff = Join-Path $RunLogDir "final.diff"
-git -C $WorktreeDir diff --cached --binary | Set-Content -Path $finalDiff -Encoding utf8
-git -C $RepoRoot apply $finalDiff
-```
-
-The explicit UTF-8 encoding on `Set-Content` matters here -- PowerShell's
-default output encoding has caused corrupted/BOM-prefixed patch files that
-`git apply` then rejects; don't drop it in favor of plain `>` redirection.
-
-If `git apply` fails, fall back to `git -C $RepoRoot apply --3way $finalDiff`,
-or inspect `$finalDiff` and apply manually -- don't force it silently.
-
-Cleanup (`--force` required, same reason as `SKILL.md`: only staged, never
-committed, inside the worktree):
-
-```powershell
+git -C $WorktreeDir diff --cached --name-status   # unstage build artifacts first
+$finalDiff = Join-Path $RunLogDir 'final.diff'
+git -C $WorktreeDir diff --cached --binary | Set-Content -Path $finalDiff -Encoding utf8NoBOM
+git -C $RepoRoot apply $finalDiff            # else: git apply --3way, or apply by hand
 git -C $RepoRoot worktree remove --force $WorktreeDir
-git -C $RepoRoot branch -D "opencode/$Label"   # optional
+git -C $RepoRoot branch -D "opencode/$Label" # optional
+
+# The worker's sessions, by the ids in its own turn streams (never by title or "latest").
+Get-ChildItem $RunLogDir -Filter 'turn*.out.json' | ForEach-Object { Read-Events $_.FullName } |
+    Where-Object { $_.sessionID } | ForEach-Object sessionID | Sort-Object -Unique |
+    ForEach-Object { $null | & $OpencodeExe session delete --standalone $_ }
+
+if ($ServiceBefore -eq 'stopped') { $null | & $OpencodeExe service stop | Out-Null }
 ```
 
-Non-repo scratch task: copy out whatever's worth keeping, then
-`Remove-Item -Recurse -Force $WorktreeDir`.
+`Set-Content -Encoding utf8NoBOM` matters: PowerShell's other encodings add a byte order
+mark or change line endings, and `git apply` then rejects the patch. `--binary` is
+required, as in `SKILL.md`.
 
 ## Parallel workers
 
-Same isolation rules as `SKILL.md`: every worker gets its own `$Label`,
-`$WorktreeDir`, session -- never shared. For concurrency, use `Start-Job`
-(background job) or `Start-Process` per worker instead of Claude Code's Bash
-`run_in_background`:
+Each worker gets its own `$Label`, `$WorktreeDir`, `$RunLogDir` and session. `Invoke-Turn`
+keeps its counters local, so run each worker's turns in its own runspace:
 
 ```powershell
-$jobs = @()
-foreach ($task in $tasks) {
-    $jobs += Start-Job -ScriptBlock {
-        param($Label, $WorktreeDir, $Model, $TimeoutSecs, $Prompt)
-        # ... same step 1-2 logic as above, parameterized ...
-    } -ArgumentList $task.Label, $task.WorktreeDir, $Model, 180, $task.Prompt
+$jobs = foreach ($task in $tasks) {
+    Start-ThreadJob -ScriptBlock {
+        param($Task)
+        # ... the helper definitions above (or a module that holds them), then steps 1-3 for $Task ...
+    } -ArgumentList $task
 }
 $jobs | Wait-Job | Receive-Job
 ```
 
-Same conservative concurrency cap as `SKILL.md` (default 3, soft ceiling 4 --
-unconfirmed heuristic, not a measured limit), and the same rule: a
-non-zero/124 exit from any worker means back off concurrency for the rest of
-the batch, don't blindly relaunch. Review and integrate each worker's diff
-independently before touching the real branch.
+Same concurrency guidance as `SKILL.md`: default 3, soft ceiling 4, fewer if any worker
+stalls or a pool rate-limits; plan around the free pools' quotas; review and integrate each
+worker's diff on its own.
 
-## Recovering orphaned workers
+## Cline as the worker
 
-Same as `SKILL.md`: an interrupted delegation leaves its worktree and branch
-behind, and nothing auto-deletes them (a hang could mean completed work
-that hasn't been reviewed yet). Check at the start of a session:
+[`cline.md`](cline.md) applies here too. Its commands map onto the helpers above:
+
+- start `cline` instead of opencode with arguments `--json`, `-c`, `$WorktreeDir`, `-m`,
+  `$Model`, `-t`, `<secs>`, `$prompt`;
+- a turn is complete when a `run_result` event has `finishReason` `completed` and the exit
+  code is 0;
+- every turn's `run_result.usage.totalCost` must be `0`.
+
+## Recovering orphaned workers, Boundaries
+
+Same as `SKILL.md`. Check at the start of a session:
 
 ```powershell
 git -C $RepoRoot worktree list | Select-String 'opencode/'
 ```
 
-For each orphan: inspect it like step 4, then either integrate (step 6) or
-discard (`git worktree remove --force` + `git branch -D`). Don't bulk-delete
-without looking.
-
-## Boundaries
-
-Identical to `SKILL.md`'s Boundaries section -- every rule there (always
-`--pure`, never `-c`/`--continue`, never `--attach`, never `--auto`, never
-`--share`, never `-i`, never point `--dir` broad, never share `--dir`/session
-between workers, never retry blindly, never skip the timeout wrapper) applies
-exactly the same way here. Nothing about those rules is platform-specific --
-go read them there rather than have them duplicated out of sync here.
+Inspect each orphan before integrating or removing it. Every rule in `SKILL.md`'s
+Boundaries section applies unchanged on Windows. Read them there rather than from a copy
+here that could fall out of sync.
