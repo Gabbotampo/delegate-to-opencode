@@ -269,7 +269,16 @@ awk '/^\{/{f=1} f' "$SMOKE_DIR.json" | jq -r 'select(.type=="error") | "\(.error
 ```
 
 A `410`/`404` (model gone or unknown) or `401`/`403` (credentials) is
-permanent: pick another model, don't resend. A `429`/`5xx` is transient.
+permanent: pick another model, don't resend. A `5xx`, or a `429` rate limit,
+is transient. **But a `429` whose `error.type` is `provider.free-limit`
+("Free usage limit reached") is a quota, not a rate limit**, and on the
+OpenCode Zen provider it covers every `opencode/*` free model at once.
+Observed on 2.1.4: after one long review turn (~23 minutes, 62 tool steps)
+on `opencode/deepseek-v4.1-flash-free`, that run and the next runs on
+`opencode/big-pickle` all ended with it. Switch to a free model on another
+provider (for example an `openrouter/...:free` one, checked as in Model
+selection) instead of resending, and keep turns bounded so one task doesn't
+spend the day's quota.
 
 If `SMOKE_EXIT` is non-zero (including 124), don't proceed with real
 delegation yet -- tell the user opencode isn't responding reliably right now
@@ -285,8 +294,9 @@ appending a timestamp. Uniqueness is load-bearing, not cosmetic: step 3
 resolves the session by matching title + directory and requires exactly one
 hit, so a reused label (same task attempted twice, same dir) yields two
 matching sessions and a hard `LOOKUP_FAILED`. Reuse the label for the branch,
-the worktree path, and `--title` so everything ties together. Set `MODEL` here
-too (see Model selection).
+the worktree path, and `--title` so everything ties together. `MODEL` stays
+whatever Model selection set -- don't reassign it here: an earlier revision
+of this block did, and silently overrode a model chosen per task (observed).
 
 Repo-based task -- isolate with a worktree, kept **outside** the repo so it
 never shows up in the user's own `git status`:
@@ -294,7 +304,6 @@ never shows up in the user's own `git status`:
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
 LABEL="json-import-fix-$(date +%s)"
-MODEL="opencode/deepseek-v4.1-flash-free"
 WORKTREE_DIR="$(mktemp -d)/$LABEL"
 git -C "$REPO_ROOT" worktree add -b "opencode/$LABEL" "$WORKTREE_DIR"
 ```
