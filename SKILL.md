@@ -786,6 +786,10 @@ wrong process's liveness. Matching `directory=` as a field is what prevents
 it; with workers in separate repos the bug is invisible, which is exactly why
 it survived an earlier round of testing.
 
+**Bug-hunting tasks:** give workers a harness they cannot fake
+([`examples/differential-hunt/`](examples/differential-hunt/)): the worker
+writes inputs, your scripts produce and compare the outputs.
+
 ## Recovering orphaned workers
 
 If a previous delegation was interrupted (agent crashed, session ended, hard

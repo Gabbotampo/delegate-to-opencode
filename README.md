@@ -31,6 +31,7 @@ coordinator.
 | [`SKILL.md`](SKILL.md) | The playbook, with opencode as the worker. Claude Code skill frontmatter, agent-agnostic body. |
 | [`references/cline.md`](references/cline.md) | What changes when the worker is Cline: commands, free models, what a worker inherits, refinements. |
 | [`references/windows.md`](references/windows.md) | PowerShell 7 translation of the opencode 2.x playbook (untested on a real Windows machine). |
+| [`examples/differential-hunt/`](examples/differential-hunt/) | Let free workers hunt bugs they cannot fake: they write probe rows, scripts run them on the reference and on the program, and compare. |
 
 ## Install
 
@@ -122,6 +123,13 @@ Rust plus Python tooling). There, free workers:
   first one's quota ran out.
 - **Gave a cross-model review.** It found one real docstring
   overstatement that the same-family reviewers had missed.
+
+- **Hunted and fixed exactness bugs at scale.** About 10 free NVIDIA workers
+  at once ran a differential hunt ([`examples/differential-hunt/`](examples/differential-hunt/))
+  against the JDK. They found `ArrayDeque` accepting `null`, `Arrays.copyOfRange`
+  with `from > to` returning `[]` and `equalsIgnoreCase` failing on non-ASCII
+  text. Then they drafted the small fixes. Claude Sonnet subagents did the
+  delicate fixes and the reviews.
 
 Every result was reviewed and re-run by the orchestrator before it was kept.
 Each such use also found something to fix in the playbook, and the git log

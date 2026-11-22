@@ -1,0 +1,13 @@
+# Harness for decaf (https://github.com/Solenopsisbot/decaf). Copy this folder next to a decaf
+# checkout (parent/decaf and parent/decaf-harness), or edit the two paths: here, and the #[path]
+# in tests/hunt.rs (decaf's tests/support/javac_fixture.rs).
+# Build once, ideally on the machine that runs the workers (its glibc must not be older):
+#   cargo test --release --no-run   then copy target/release/deps/hunt-<hash> somewhere stable.
+[package]
+name = "hunt-harness"
+version = "0.1.0"
+edition = "2024"
+[dependencies]
+horizon-native-java = { path = "../decaf/crates/horizon-native-java" }
+zip = { version = "=9.1.3", default-features = false, features = ["deflate"] }
+[workspace]
