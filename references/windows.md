@@ -1,5 +1,14 @@
 # Windows (PowerShell, no WSL)
 
+> **Still the opencode 1.x translation.** `SKILL.md` now targets opencode
+> 2.x, whose `opencode run` no longer has `--pure`, `--dir`, `--attach` or
+> `--port`. Before using this file with 2.x, apply the same changes
+> `SKILL.md` describes: close stdin (`$null | opencode run ...` or
+> `-RedirectStandardInput` from an empty file), pass `--standalone`, start the
+> process with the workspace as its working directory instead of `--dir`, set
+> `OPENCODE_CONFIG_DIR` to a clean config directory instead of `--pure`, and
+> read the session id from the turn's own event stream.
+
 Same rules, same reasoning, same safety boundaries as [`SKILL.md`](../SKILL.md)
 -- read that file first for the *why* (Is this task a fit, Boundaries,
 never-trust-blindly review, the timeout/hang caveat, the cost guard for

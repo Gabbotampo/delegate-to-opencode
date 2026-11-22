@@ -7,7 +7,8 @@ and iterates on the worker's output before accepting anything -- never
 trusting `opencode`'s exit code or the model's own claims of success without
 independently checking the diff and running real verification.
 
-Defaults to the free `opencode/nemotron-3-ultra-free` model ($0 cost), but any
+Defaults to the free `opencode/deepseek-v4.1-flash-free` model ($0 cost; chosen
+by a small benchmark of the free models on the author's install, see `SKILL.md`), but any
 model your `opencode` install supports can be used instead -- just say which
 one you want.
 
@@ -45,10 +46,13 @@ metadata; skip straight to the `# Delegate to opencode` heading.
 
 ## Prerequisites
 
-- `opencode` CLI installed and authenticated (`opencode auth login`).
-- `opencode.json`'s `permission` block allowing non-interactive `read`/`edit`/`bash`
-  (otherwise it will try to prompt for confirmation and hang -- see `SKILL.md`
-  for why, and why `--dir` matters).
+- `opencode` CLI **2.x** installed and authenticated (`opencode auth login`).
+  Verified on 2.1.4. For opencode 1.x (where `opencode run` still has
+  `--pure` and `--dir`) use the 1.x revision of `SKILL.md`, commit `d937f69`.
+- Nothing to change in your own opencode config: the playbook gives workers a
+  separate, throwaway config directory that only allows non-interactive
+  `read`/`edit`/`bash` and keeps your global plugins, prompts and skills out
+  (see `SKILL.md` for why).
 - `git`, `jq`, and standard coreutils.
 
 ## Platform support
@@ -65,9 +69,10 @@ a real POSIX-ish shell.
   not the Windows side.
 - **Native Windows (PowerShell, no WSL):** see
   [`references/windows.md`](references/windows.md) -- a full PowerShell
-  translation of every command block, same rules and reasoning as
-  `SKILL.md`. **Also untested on a real Windows machine** -- it's a careful
-  translation, not a verified port. Issues/PRs from anyone who can actually
+  translation of every command block of the **1.x** playbook, same rules and
+  reasoning. It has not been updated for opencode 2.x yet. **Also untested on
+  a real Windows machine** -- it's a careful translation, not a verified
+  port. Issues/PRs from anyone who can actually
   run it on Windows are genuinely welcome.
 
 ## Usage examples
@@ -121,20 +126,20 @@ math -- it's not boilerplate, use it as a real filter.
 
 ## Known limitation
 
-`opencode run` has been observed to hang indefinitely -- no output, no error,
-no exit -- on at least one setup, in two distinct modes: during **bootstrap**
-(before the session is even created, nothing done) and **mid-turn** (where the
-target file had already been read *and correctly edited* on disk before the
-process stalled on a later internal call). Root cause wasn't pinned down.
+Earlier revisions documented `opencode run` hanging indefinitely -- no
+output, no error, no exit -- with no known cause. On opencode 2.1.4 the
+bootstrap hang has a reproducible cause: `opencode run` reads stdin when it
+isn't a terminal and waits for it to close, and under an agent's shell tool
+stdin is usually an open pipe or socket that never closes. Same command,
+same machine: inherited stdin hung 2/2 until the timeout, `</dev/null`
+finished 2/2 in about two seconds. The playbook now always closes stdin.
 
-Rather than a fixed timeout, every delegation turn is **supervised**: the
-playbook watches opencode's terminal event (`step_finish` with
-`part.reason == "stop"`) for completion and its internal log for liveness --
-so it keeps waiting while real progress is happening and kills only once
-things go quiet. On any non-completion outcome it inspects the worktree before
-concluding nothing happened, precisely because of the mid-turn case above. See
-step 2 of `SKILL.md` for the full mechanism. Issues and PRs narrowing the root
-cause down further are welcome.
+Free and shared backends can still stall **mid-turn**, sometimes after the
+target file was already edited correctly on disk. So every delegation turn
+is still **supervised** rather than run under a fixed timeout: it waits
+while the worker's own event stream and server log are moving, kills it once
+they go quiet, and inspects the worktree before concluding nothing happened.
+See step 2 of `SKILL.md` for the full mechanism.
 
 ## License
 
